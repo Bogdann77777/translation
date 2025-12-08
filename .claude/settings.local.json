@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"C:\\Python311\\python.exe\" -c \"import os; path = r''C:\\Users\\bogdan\\AppData\\Local\\tts''; [print(f) for f in os.listdir(path) if os.path.isdir(os.path.join(path, f))]\")",
+      "Bash(\"C:\\Python311\\python.exe\" -c \"\nimport os\npath = r''C:\\Users\\bogdan\\AppData\\Local\\tts\\tts_models--multilingual--multi-dataset--xtts_v2''\ntotal = 0\nfor f in os.listdir(path):\n    fp = os.path.join(path, f)\n    if os.path.isfile(fp):\n        size = os.path.getsize(fp)\n        total += size\n        print(f''{f}: {size/1024/1024:.1f} MB'')\nprint(f''TOTAL: {total/1024/1024:.1f} MB'')\n\")",
+      "Bash(\"C:\\Python311\\python.exe\" -c:*)",
+      "Bash(\"C:\\Python311\\python.exe\":*)",
+      "Bash(where:*)",
+      "Bash(git init:*)",
+      "Bash(git add:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

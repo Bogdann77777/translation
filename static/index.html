@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Speech Translator</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <header>
+        <h1>🎙️ Real-Time English → Russian Translator</h1>
+        <div id="status" class="status-disconnected">Disconnected</div>
+    </header>
+    
+    <main>
+        <section class="controls">
+            <button id="startBtn" class="btn btn-start">Start Session</button>
+            <button id="stopBtn" class="btn btn-stop" disabled>Stop Session</button>
+
+            <div class="speed-control">
+                <label for="speedSlider">Speed: <span id="speedValue">1.3x</span></label>
+                <input type="range" id="speedSlider" min="1.0" max="2.0" step="0.1" value="1.3">
+            </div>
+
+            <div class="voice-control">
+                <label for="voiceSelect">Voice:</label>
+                <select id="voiceSelect">
+                    <option value="">Loading...</option>
+                </select>
+            </div>
+
+            <div class="mic-control">
+                <label for="micSelect">Microphone:</label>
+                <select id="micSelect">
+                    <option value="">Click to load devices...</option>
+                </select>
+                <button id="refreshMicBtn" class="btn-small" title="Refresh microphone list">🔄</button>
+            </div>
+        </section>
+        
+        <div class="transcripts">
+            <div class="panel">
+                <h2>🎤 English (Original)</h2>
+                <div id="englishText" class="transcript-box"></div>
+            </div>
+            
+            <div class="panel">
+                <h2>🗣️ Russian (Translation)</h2>
+                <div id="russianText" class="transcript-box"></div>
+            </div>
+        </div>
+        
+        <section class="metrics">
+            <h2>📊 System Metrics</h2>
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <h3>STT Latency</h3>
+                    <div class="metric-value" id="latencyStt">--</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Translation</h3>
+                    <div class="metric-value" id="latencyTranslation">--</div>
+                </div>
+                <div class="metric-card">
+                    <h3>TTS Latency</h3>
+                    <div class="metric-value" id="latencyTts">--</div>
+                </div>
+                <div class="metric-card highlight">
+                    <h3>End-to-End</h3>
+                    <div class="metric-value" id="latencyE2e">--</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Batches</h3>
+                    <div class="metric-value" id="batchCount">0</div>
+                </div>
+                <div class="metric-card">
+                    <h3>Uptime</h3>
+                    <div class="metric-value" id="uptime">0s</div>
+                </div>
+            </div>
+            
+            <div class="queue-status">
+                <h3>Batch Queue (3 Slots)</h3>
+                <div class="slots">
+                    <div class="slot" id="slot1">
+                        <div class="slot-number">1</div>
+                        <div class="slot-status">Empty</div>
+                    </div>
+                    <div class="slot" id="slot2">
+                        <div class="slot-number">2</div>
+                        <div class="slot-status">Empty</div>
+                    </div>
+                    <div class="slot" id="slot3">
+                        <div class="slot-number">3</div>
+                        <div class="slot-status">Empty</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="logs-section">
+            <div class="logs-header">
+                <h2>🔍 System Logs</h2>
+                <button id="clearLogsBtn" class="btn-small">Clear</button>
+            </div>
+            <div id="logConsole" class="log-console"></div>
+        </section>
+    </main>
+
+    <footer>
+        <p>Built with FastAPI + XTTS-v2 + Groq Whisper + OpenRouter</p>
+    </footer>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
