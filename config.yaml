@@ -24,7 +24,7 @@ models:
     model: "tts_models/multilingual/multi-dataset/xtts_v2"
     device: "cuda"
     gpu_id: 0
-    voice_sample: "voice_samples/russian_voice.wav"
+    voice_sample: "voice_samples/Aleksandr.wav"
     language: "ru"
     streaming: true
     output_sample_rate: 24000
