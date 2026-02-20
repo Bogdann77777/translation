@@ -20,8 +20,16 @@ models:
     streaming: true
 
   tts:
-    provider: "xtts"
+    provider: "cosyvoice"  # "xtts" or "cosyvoice"
+
+    # CosyVoice3 settings (provider: "cosyvoice")
+    model_dir: "models/CosyVoice3-0.5B"
+    system_prompt: "You are a helpful assistant.<|endofprompt|>Говорите естественно и выразительно."
+
+    # XTTS-v2 settings (provider: "xtts") - LEGACY
     model: "tts_models/multilingual/multi-dataset/xtts_v2"
+
+    # Common settings
     device: "cuda"
     gpu_id: 1
     voice_sample: "voice_samples/Aleksandr.wav"

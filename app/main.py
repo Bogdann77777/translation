@@ -69,14 +69,21 @@ async def startup_preload_models():
     except Exception as e:
         logger.error(f"[1/3] Whisper load FAILED: {e}")
 
-    # 2. Load XTTS (TTS)
-    logger.info("[2/3] Loading XTTS model...")
+    # 2. Load TTS (XTTS or CosyVoice)
+    tts_config = config["models"]["tts"]
+    tts_provider = tts_config.get("provider", "xtts")
+    logger.info(f"[2/3] Loading TTS model ({tts_provider})...")
     try:
-        from app.components.xtts_engine import XTTSEngine
-        preloaded_tts = XTTSEngine()
-        logger.info("[2/3] XTTS loaded OK")
+        if tts_provider == "cosyvoice":
+            from app.components.cosy_voice_engine import CosyVoiceEngine
+            preloaded_tts = CosyVoiceEngine()
+            logger.info("[2/3] CosyVoice3 loaded OK")
+        else:  # default: xtts
+            from app.components.xtts_engine import XTTSEngine
+            preloaded_tts = XTTSEngine()
+            logger.info("[2/3] XTTS loaded OK")
     except Exception as e:
-        logger.error(f"[2/3] XTTS load FAILED: {e}")
+        logger.error(f"[2/3] TTS load FAILED: {e}")
 
     # 3. Load OpenRouter client (LLM)
     logger.info("[3/3] Loading OpenRouter client...")
