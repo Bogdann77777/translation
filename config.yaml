@@ -38,7 +38,7 @@ pipeline:
   context_max_chars: 2000
   batch_queue_size: 8  # Pipeline processing: 8 slots for non-stop playback (increased for literal mode)
   max_batch_duration: 15.0
-  min_ready_chunks_before_start: 3  # NON-STOP: Накопить 3 готовых чанка перед началом воспроизведения
+  min_ready_chunks_before_start: 1  # TRUE STREAMING: Играть каждый чанк сразу как готов (no buffering)
   
   vad:
     enabled: true

@@ -38,24 +38,26 @@ class Orchestrator:
 
         self.logger.info("Orchestrator initialized")
 
-    async def start_session(self, mode: str = 'contextual') -> None:
+    async def start_session(self, mode: str = 'contextual', topic: str = None) -> None:
         """
         Запускает новую сессию.
 
         Args:
             mode: Режим перевода ('contextual' или 'literal')
+            topic: Опциональная тема/контекст разговора (для улучшения точности)
         """
         self.translation_mode = mode
         log_json(self.logger, "INFO", "Starting session",
-                 session_id=id(self), mode=mode, timestamp=time.time())
+                 session_id=id(self), mode=mode, topic=topic or 'none', timestamp=time.time())
 
-        # Pass preloaded models to BatchQueue
+        # Pass preloaded models and topic to BatchQueue
         self.batch_queue = BatchQueue(
             self.websocket,
             whisper_client=self.whisper_client,
             tts_engine=self.tts_engine,
             llm_client=self.llm_client,
-            metrics_collector=self.metrics
+            metrics_collector=self.metrics,
+            topic=topic
         )
 
         # Выбираем процессор в зависимости от режима

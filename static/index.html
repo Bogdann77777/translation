@@ -40,9 +40,15 @@
             <div class="mode-control">
                 <label for="modeSelect">Translation Mode:</label>
                 <select id="modeSelect">
+                    <option value="literal" selected>Дословный переводчик (скорость, ~3-4s задержка)</option>
                     <option value="contextual">Смысловой переводчик (качество, 12-18s чанки)</option>
-                    <option value="literal">Дословный переводчик (скорость, <5s задержка)</option>
                 </select>
+            </div>
+
+            <div class="topic-control">
+                <label for="topicInput">Topic/Context (опционально):</label>
+                <input type="text" id="topicInput" placeholder="Напр: проповедь, фильм Аватар, подкаст о технологиях..." maxlength="100">
+                <small>Помогает переводчику понимать общую тему разговора и избегать случайных слов</small>
             </div>
         </section>
         

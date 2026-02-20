@@ -7,7 +7,7 @@ let mediaStream = null;
 let scriptNode = null;
 let isRecording = false;
 let currentSpeed = 1.3;
-let translationMode = 'contextual'; // 'contextual' or 'literal'
+let translationMode = 'literal'; // 'contextual' or 'literal' (default: literal for fast response)
 
 // ============================================
 // LOGGING TO HTML CONSOLE
@@ -298,11 +298,13 @@ async function startSession() {
 
         console.log('[AUDIO] Audio pipeline connected');
 
-        // Отправляем команду старта на сервер с режимом перевода
-        console.log('[AUDIO] Sending "start" command to server (mode:', translationMode + ')');
+        // Отправляем команду старта на сервер с режимом перевода и темой
+        const topic = document.getElementById('topicInput').value.trim();
+        console.log('[AUDIO] Sending "start" command to server (mode:', translationMode, 'topic:', topic || 'none' + ')');
         ws.send(JSON.stringify({
             type: 'start',
-            mode: translationMode
+            mode: translationMode,
+            topic: topic || null
         }));
 
         // Обновляем UI

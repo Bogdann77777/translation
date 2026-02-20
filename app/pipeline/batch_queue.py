@@ -32,7 +32,7 @@ class BatchQueue:
         Когда Slot 1 освободился → Slot 2 → Slot 1 (playing).
     """
     
-    def __init__(self, websocket, whisper_client=None, tts_engine=None, llm_client=None, metrics_collector=None):
+    def __init__(self, websocket, whisper_client=None, tts_engine=None, llm_client=None, metrics_collector=None, topic=None):
         """
         Инициализация очереди батчей.
 
@@ -42,6 +42,7 @@ class BatchQueue:
             tts_engine: Preloaded TTS engine (optional)
             llm_client: Preloaded LLM client (optional)
             metrics_collector: Shared metrics collector (optional)
+            topic: Optional topic/context for translation (optional)
         """
         self.config = load_config()["pipeline"]
         self.logger = setup_logger(__name__)
@@ -72,6 +73,9 @@ class BatchQueue:
             self.xtts_engine = XTTSEngine()
 
         self.context_buffer = ContextBuffer()
+
+        # Topic/context for better translation accuracy
+        self.topic = topic
 
         # НОВАЯ АРХИТЕКТУРА: Очередь готовых батчей (FIFO)
         self.ready_queue = asyncio.Queue()  # Неограниченная очередь готовых батчей
@@ -389,13 +393,13 @@ class BatchQueue:
                 self.metrics.record_latency("stt", stt_duration)
                 self.logger.debug(f"STT completed in {stt_duration:.2f}s")
 
-            # STEP 2: Translation (OpenRouter + context)
+            # STEP 2: Translation (OpenRouter + context + topic)
             # Только 1 батч может переводить одновременно
             async with self.translation_semaphore:
                 start = time.time()
                 context = await self.context_buffer.get_context()
                 translation = await self.openrouter_client.translate(
-                    transcription["text"], context
+                    transcription["text"], context, topic=self.topic
                 )
                 translation_duration = time.time() - start
                 self.metrics.record_latency("translation", translation_duration)

@@ -201,8 +201,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
             if msg_type == "start":
                 mode = message.get("mode", "contextual")
-                logger.info(f"Processing 'start' message (mode: {mode})")
-                await orchestrator.start_session(mode=mode)
+                topic = message.get("topic", None)
+                logger.info(f"Processing 'start' message (mode: {mode}, topic: {topic or 'none'})")
+                await orchestrator.start_session(mode=mode, topic=topic)
 
             elif msg_type == "audio":
                 audio_data_b64 = message.get("data", "")

@@ -47,9 +47,9 @@ class LiteralStreamProcessor:
         self.lock = asyncio.Lock()
 
         # ПАРАМЕТРЫ БЫСТРОГО РЕЖИМА
-        self.min_chunk_duration = 2.0  # Минимум 2 секунды (быстрая реакция)
-        self.max_chunk_duration = 5.0  # Максимум 5 секунд (не накапливаем долго)
-        self.min_silence_duration = 0.2  # 0.2 сек тишины = разрыв (быстрая реакция)
+        self.min_chunk_duration = 1.5  # Минимум 1.5 секунды (максимально быстрая реакция)
+        self.max_chunk_duration = 4.0  # Максимум 4 секунды (не накапливаем долго)
+        self.min_silence_duration = 0.15  # 0.15 сек тишины = разрыв (очень быстрая реакция)
 
         self.logger.info(
             f"LiteralStreamProcessor initialized (FAST mode: "
