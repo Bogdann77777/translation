@@ -10,18 +10,25 @@ This guide walks you through installing CosyVoice3 for zero-shot TTS in the tran
 
 ## Installation Steps
 
-### 1. Install CosyVoice Dependencies
+### 1. Upgrade pip and setuptools (IMPORTANT!)
+
+```bash
+# Fix pkg_resources error (ModuleNotFoundError: No module named 'pkg_resources')
+python -m pip install --upgrade pip setuptools wheel
+```
+
+### 2. Install CosyVoice Dependencies
 
 ```bash
 # Install required packages
-pip install modelscope torchaudio
+pip install modelscope torchaudio soundfile
 
-# Install sox (audio processing library)
+# Install sox (audio processing library) - OPTIONAL
 # Windows: Download from https://sourceforge.net/projects/sox/files/sox/
 # Linux: sudo apt-get install sox libsox-dev
 ```
 
-### 2. Clone CosyVoice Repository (Third-party dependency)
+### 3. Clone CosyVoice Repository (Third-party dependency)
 
 ```bash
 # Navigate to project root
@@ -37,7 +44,7 @@ cd CosyVoice
 pip install -r requirements.txt
 ```
 
-### 3. Download Pretrained Model
+### 4. Download Pretrained Model
 
 ```python
 # Run this Python script to download model
@@ -51,7 +58,7 @@ snapshot_download(
 
 Or download manually from: https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512
 
-### 4. Update Config
+### 5. Update Config
 
 Model will be loaded from: `E:/crewai/translator/models/CosyVoice3-0.5B`
 
@@ -71,6 +78,8 @@ print("CosyVoice3 loaded successfully!")
 
 ## Troubleshooting
 
+**pkg_resources Error**: Run `python -m pip install --upgrade pip setuptools wheel`
+**grpcio Build Error**: Upgrade setuptools and wheel, then retry
 **Import Error**: Make sure to add Matcha-TTS to Python path before importing
 **Model Not Found**: Check model_dir path is correct
 **CUDA OOM**: Use GPU 1 (TTS on GPU 1, Whisper on GPU 0)
