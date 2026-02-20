@@ -10,6 +10,7 @@ from app.monitoring.logger import setup_logger, log_json
 from app.monitoring.metrics import MetricsCollector
 from app.pipeline.batch_queue import BatchQueue
 from app.pipeline.stream_processor import StreamProcessor
+from app.pipeline.literal_stream_processor import LiteralStreamProcessor
 
 
 class Orchestrator:
@@ -33,22 +34,38 @@ class Orchestrator:
         self.stream_processor = None
         self.session_active = False
         self.restart_count = 0
+        self.translation_mode = 'contextual'  # 'contextual' or 'literal'
 
         self.logger.info("Orchestrator initialized")
 
-    async def start_session(self) -> None:
-        """Запускает новую сессию."""
+    async def start_session(self, mode: str = 'contextual') -> None:
+        """
+        Запускает новую сессию.
+
+        Args:
+            mode: Режим перевода ('contextual' или 'literal')
+        """
+        self.translation_mode = mode
         log_json(self.logger, "INFO", "Starting session",
-                 session_id=id(self), timestamp=time.time())
+                 session_id=id(self), mode=mode, timestamp=time.time())
 
         # Pass preloaded models to BatchQueue
         self.batch_queue = BatchQueue(
             self.websocket,
             whisper_client=self.whisper_client,
             tts_engine=self.tts_engine,
-            llm_client=self.llm_client
+            llm_client=self.llm_client,
+            metrics_collector=self.metrics
         )
-        self.stream_processor = StreamProcessor(self.batch_queue)
+
+        # Выбираем процессор в зависимости от режима
+        if mode == 'literal':
+            self.stream_processor = LiteralStreamProcessor(self.batch_queue)
+            self.logger.info("🚀 LITERAL mode: Fast processing (2-5s chunks, 0.2s pauses)")
+        else:
+            self.stream_processor = StreamProcessor(self.batch_queue)
+            self.logger.info("🎯 CONTEXTUAL mode: Quality processing (12-18s chunks, 1.0s pauses)")
+
         self.session_active = True
 
         # Запускаем фоновый цикл воспроизведения
@@ -56,6 +73,7 @@ class Orchestrator:
 
         await self.websocket.send_json({
             "type": "session_started",
+            "mode": mode,
             "timestamp": time.time()
         })
     

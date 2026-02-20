@@ -200,8 +200,9 @@ async def websocket_endpoint(websocket: WebSocket):
             logger.debug(f"Received message #{message_count}: type={msg_type}")
 
             if msg_type == "start":
-                logger.info("Processing 'start' message")
-                await orchestrator.start_session()
+                mode = message.get("mode", "contextual")
+                logger.info(f"Processing 'start' message (mode: {mode})")
+                await orchestrator.start_session(mode=mode)
 
             elif msg_type == "audio":
                 audio_data_b64 = message.get("data", "")
@@ -240,11 +241,38 @@ async def websocket_endpoint(websocket: WebSocket):
         current_orchestrator = None  # Clear global reference
 
     except Exception as e:
-        logger.error(f"WebSocket error: {type(e).__name__}: {e}", exc_info=True)
-        if orchestrator.session_active:
-            await orchestrator.stop_session()
+        error_type = type(e).__name__
+        error_msg = str(e)
+
+        # Детальное логирование ошибки
+        logger.error(f"WebSocket error: {error_type}: {error_msg}", exc_info=True)
+
+        # Проверяем специфичные ошибки Windows 11 / CUDA
+        if "cuda" in error_msg.lower() or "out of memory" in error_msg.lower():
+            logger.critical(f"CUDA/VRAM error detected! This may be Windows 11 specific. Error: {error_msg}")
+            logger.critical("SOLUTION: Try reducing batch_queue_size in config.yaml or use smaller model")
+
+            # Очищаем CUDA cache
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    logger.info("CUDA cache cleared after error")
+            except Exception as cuda_err:
+                logger.error(f"Failed to clear CUDA cache: {cuda_err}")
+
+        # Останавливаем сессию если активна
+        try:
+            if orchestrator.session_active:
+                logger.info("Stopping active session after error")
+                await orchestrator.stop_session()
+        except Exception as stop_err:
+            logger.error(f"Error stopping session: {stop_err}")
+
         current_orchestrator = None
-        raise
+
+        # НЕ пробрасываем ошибку дальше - graceful shutdown
+        # raise
 
 
 if __name__ == "__main__":

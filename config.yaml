@@ -13,17 +13,17 @@ models:
 
   translation:
     provider: "openrouter"
-    model: "x-ai/grok-3-mini"
+    model: "mistralai/ministral-14b-2512"
     api_key_env: "OPENROUTER_API_KEY"
     temperature: 0.3
-    max_tokens: 256
+    max_tokens: 512
     streaming: true
 
   tts:
     provider: "xtts"
     model: "tts_models/multilingual/multi-dataset/xtts_v2"
     device: "cuda"
-    gpu_id: 0
+    gpu_id: 1
     voice_sample: "voice_samples/Aleksandr.wav"
     language: "ru"
     streaming: true
@@ -36,15 +36,17 @@ models:
 pipeline:
   context_window: 10
   context_max_chars: 2000
-  batch_queue_size: 3
+  batch_queue_size: 8  # Pipeline processing: 8 slots for non-stop playback (increased for literal mode)
   max_batch_duration: 15.0
+  min_ready_chunks_before_start: 3  # NON-STOP: Накопить 3 готовых чанка перед началом воспроизведения
   
   vad:
     enabled: true
     threshold: 0.5
     min_speech_duration: 3.0    # Minimum 3 sec of speech before processing (bigger chunks)
-    min_silence_duration: 0.5   # 0.5 sec silence = end of phrase (faster response)
-    max_phrase_duration: 10.0   # Auto-cut at 10 sec (was 15)
+    min_silence_duration: 1.0   # 1.0 sec silence = end of phrase (balance: not too short, not too long)
+    min_chunk_duration: 12.0    # MINIMUM 12 sec input audio (ensures 7+ sec TTS output to cover processing time 7-9s)
+    max_phrase_duration: 18.0   # MAXIMUM 18 sec input audio (ensures ~12 sec TTS output, FAT chunks to cover processing)
     speech_pad_ms: 200
   
   audio:
@@ -76,7 +78,7 @@ server:
 # ============================================
 monitoring:
   enabled: true
-  log_level: "DEBUG"
+  log_level: "INFO"
   log_dir: "./logs"
   
   metrics:

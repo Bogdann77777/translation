@@ -17,13 +17,13 @@ _loggers: Dict[str, logging.Logger] = {}
 def setup_logger(name: str) -> logging.Logger:
     """
     Создаёт или возвращает существующий logger с настройками.
-    
+
     Настройки:
         - File handler: JSON формат для парсинга (Grafana/ELK/Loki)
         - Console handler: Plain text для human reading
         - Уровень логирования: из config.yaml (INFO/DEBUG/WARNING/ERROR)
         - Автоматическое создание директории логов
-    
+
     Алгоритм:
         1. Проверяем кэш (_loggers)
         2. Если логгер уже создан → возвращаем его (singleton pattern)
@@ -39,13 +39,13 @@ def setup_logger(name: str) -> logging.Logger:
            - Добавляем handlers к logger
            - Сохраняем в кэш _loggers[name]
            - Возвращаем logger
-    
+
     Args:
         name: Имя логгера (обычно __name__ модуля)
-    
+
     Returns:
         logging.Logger: Настроенный логгер с handlers
-    
+
     Example:
         >>> logger = setup_logger(__name__)
         >>> logger.info("Starting translation pipeline")
@@ -53,38 +53,77 @@ def setup_logger(name: str) -> logging.Logger:
     # Проверяем кэш
     if name in _loggers:
         return _loggers[name]
-    
+
     # Загружаем конфиг
     config = load_config()
     log_level = config["monitoring"]["log_level"]
     log_dir = Path(config["monitoring"]["log_dir"])
-    
+
     # Создаём директорию
     log_dir.mkdir(exist_ok=True)
-    
+
+    # CRITICAL: Отключаем логи от сторонних библиотек (только первый раз)
+    if not _loggers:
+        _silence_third_party_loggers()
+
     # Создаём logger
     logger = logging.getLogger(name)
     logger.setLevel(getattr(logging, log_level))
-    
+
     # File handler (JSON для парсинга)
     log_file = log_dir / f"session_{datetime.now().strftime('%Y-%m-%d')}.log"
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setFormatter(JSONFormatter())
-    
+
     # Console handler (plain text для human reading)
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     ))
-    
+
     # Добавляем handlers
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
-    
+
     # Кэшируем
     _loggers[name] = logger
-    
+
     return logger
+
+
+def _silence_third_party_loggers():
+    """
+    Отключает или уменьшает уровень логирования для сторонних библиотек.
+
+    Эти библиотеки генерируют много DEBUG/INFO логов, которые засоряют консоль.
+    Мы устанавливаем для них уровень WARNING, чтобы видеть только важные ошибки.
+    """
+    noisy_loggers = [
+        "TTS",
+        "transformers",
+        "torch",
+        "urllib3",
+        "httpx",
+        "httpcore",
+        "openai",
+        "groq",
+        "faster_whisper",
+        "numba",
+        "matplotlib",
+        "PIL",
+        "h5py",
+        "fairseq",
+        "coqpit",
+        "trainer",
+        "bangla",
+        "encodec",
+        "uvicorn",
+        "uvicorn.access",
+        "uvicorn.error",
+    ]
+
+    for logger_name in noisy_loggers:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
 

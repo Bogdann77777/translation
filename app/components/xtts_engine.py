@@ -15,15 +15,15 @@ def _patched_torch_load(*args, **kwargs):
     return _original_torch_load(*args, **kwargs)
 torch.load = _patched_torch_load
 
-# CRITICAL FIX 1b: Also patch TTS internal load_fsspec function
-import TTS.utils.io
-_original_load_fsspec = TTS.utils.io.load_fsspec
-def _patched_load_fsspec(path, map_location=None, **kwargs):
-    """Patch for TTS load_fsspec with weights_only=False."""
-    if 'weights_only' not in kwargs:
-        kwargs['weights_only'] = False
-    return _original_load_fsspec(path, map_location=map_location, **kwargs)
-TTS.utils.io.load_fsspec = _patched_load_fsspec
+# CRITICAL FIX 1b: Removed patched_load_fsspec because TTS 0.22.0+ already passes weights_only=False
+# import TTS.utils.io
+# _original_load_fsspec = TTS.utils.io.load_fsspec
+# def _patched_load_fsspec(path, map_location=None, **kwargs):
+#     """Patch for TTS load_fsspec with weights_only=False."""
+#     if 'weights_only' not in kwargs:
+#         kwargs['weights_only'] = False
+#     return _original_load_fsspec(path, map_location=map_location, **kwargs)
+# TTS.utils.io.load_fsspec = _patched_load_fsspec
 
 # CRITICAL FIX 2: Patch torchaudio.load to use soundfile instead of torchcodec
 # Reason: torchcodec requires FFmpeg which may not be available on Windows
@@ -45,6 +45,18 @@ def _patched_torchaudio_load(filepath, *args, **kwargs):
     return audio_tensor, sr
 
 torchaudio.load = _patched_torchaudio_load
+
+# CRITICAL FIX 3: Patch GPT2InferenceModel for transformers >= 4.50
+# Issue: Newer transformers removed GenerationMixin from PreTrainedModel, breaking TTS generate() call
+try:
+    from transformers.generation import GenerationMixin
+    from TTS.tts.layers.xtts.gpt_inference import GPT2InferenceModel
+    
+    if GenerationMixin not in GPT2InferenceModel.__bases__:
+        # Inject GenerationMixin into MRO
+        GPT2InferenceModel.__bases__ = (GenerationMixin,) + GPT2InferenceModel.__bases__
+except Exception as e:
+    print(f"Warning: Failed to patch GPT2InferenceModel: {e}")
 
 from TTS.api import TTS
 from typing import Optional
@@ -75,10 +87,8 @@ class XTTSEngine:
 
             self.logger.info(f"Starting XTTS initialization: device={self.device}, gpu_id={self.gpu_id}")
 
-            # Устанавливаем GPU для XTTS
-            if self.device == "cuda":
-                torch.cuda.set_device(self.gpu_id)
-                self.logger.info(f"Setting XTTS to GPU {self.gpu_id}")
+            # REMOVED: torch.cuda.set_device(self.gpu_id) - causes conflicts with faster-whisper
+            # self.logger.info(f"Setting XTTS to GPU {self.gpu_id}")
 
             self.logger.info(f"Loading TTS model: {self.config['model']}")
 
@@ -86,10 +96,15 @@ class XTTSEngine:
             t0 = time.time()
             self.logger.info("[XTTS] Step 1: Creating TTS object...")
 
+            # Initialize on CPU first, then move to specific GPU
             self.model = TTS(
                 model_name=self.config["model"],
-                gpu=(self.device == "cuda")
+                gpu=False 
             )
+            
+            # Move to correct device
+            target_device = f"{self.device}:{self.gpu_id}" if self.device == "cuda" else "cpu"
+            self.model.to(target_device)
 
             t1 = time.time()
             self.logger.info(f"[XTTS] Step 1 done in {t1-t0:.1f}s - TTS object created")

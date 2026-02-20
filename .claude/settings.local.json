@@ -7,7 +7,20 @@
       "Bash(\"C:\\Python311\\python.exe\":*)",
       "Bash(where:*)",
       "Bash(git init:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git config:*)",
+      "Bash(git remote add:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(cat:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(curl:*)",
+      "Bash(dir:*)",
+      "Bash(\"C:\\\\Python311\\\\python.exe\" -c \"import torch; print\\(f''CUDA available: {torch.cuda.is_available\\(\\)}''\\); print\\(f''GPU count: {torch.cuda.device_count\\(\\)}''\\); [print\\(f''GPU {i}: {torch.cuda.get_device_name\\(i\\)}''\\) for i in range\\(torch.cuda.device_count\\(\\)\\)]\")",
+      "Bash(\"C:\\\\Python311\\\\python.exe\":*)",
+      "Bash(\"C:\\\\Python311\\\\python.exe\" -c \"import torch; print\\(''Testing GPU 1 speed...''\\); torch.cuda.set_device\\(1\\); x = torch.randn\\(1000, 1000, device=''cuda:1''\\); import time; t0 = time.time\\(\\); for _ in range\\(100\\): y = torch.matmul\\(x, x\\); torch.cuda.synchronize\\(\\); t1 = time.time\\(\\); print\\(f''GPU 1 benchmark: {t1-t0:.3f}s for 100 matrix multiplications''\\)\")",
+      "Bash(\"C:\\\\Python311\\\\python.exe\" -c \"import torch, time; print\\(''Testing GPU 1 speed...''\\); torch.cuda.set_device\\(1\\); x = torch.randn\\(1000, 1000, device=''cuda:1''\\); t0 = time.time\\(\\); [torch.matmul\\(x, x\\) for _ in range\\(100\\)]; torch.cuda.synchronize\\(\\); t1 = time.time\\(\\); print\\(f''GPU 1 benchmark: {t1-t0:.3f}s for 100 iterations''\\)\")"
     ],
     "deny": [],
     "ask": []

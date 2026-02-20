@@ -7,6 +7,7 @@ let mediaStream = null;
 let scriptNode = null;
 let isRecording = false;
 let currentSpeed = 1.3;
+let translationMode = 'contextual'; // 'contextual' or 'literal'
 
 // ============================================
 // LOGGING TO HTML CONSOLE
@@ -83,6 +84,13 @@ function connectWebSocket() {
     ws.onclose = (event) => {
         console.log('[WS] WebSocket disconnected. Code:', event.code, 'Reason:', event.reason);
         updateStatus('disconnected');
+        
+        // Stop recording if active
+        if (isRecording) {
+            console.log('[WS] Connection lost while recording - stopping session');
+            stopSession();
+        }
+
         // Переподключение через 3 секунды
         console.log('[WS] Reconnecting in 3 seconds...');
         setTimeout(connectWebSocket, 3000);
@@ -290,9 +298,12 @@ async function startSession() {
 
         console.log('[AUDIO] Audio pipeline connected');
 
-        // Отправляем команду старта на сервер
-        console.log('[AUDIO] Sending "start" command to server');
-        ws.send(JSON.stringify({ type: 'start' }));
+        // Отправляем команду старта на сервер с режимом перевода
+        console.log('[AUDIO] Sending "start" command to server (mode:', translationMode + ')');
+        ws.send(JSON.stringify({
+            type: 'start',
+            mode: translationMode
+        }));
 
         // Обновляем UI
         isRecording = true;
@@ -519,6 +530,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Load microphones on page load
     loadMicrophones();
+
+    // Mode selector
+    const modeSelect = document.getElementById('modeSelect');
+    modeSelect.addEventListener('change', () => {
+        translationMode = modeSelect.value;
+        console.log('[MODE] Switched to:', translationMode);
+
+        // Disable mode change during active session
+        if (isRecording) {
+            console.warn('[MODE] Cannot change mode during active session');
+            alert('Please stop the current session before changing translation mode');
+            // Revert to previous value
+            modeSelect.value = translationMode === 'contextual' ? 'literal' : 'contextual';
+            translationMode = modeSelect.value;
+        }
+    });
 
     console.log('App initialized');
 });
