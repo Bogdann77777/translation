@@ -68,18 +68,22 @@ class GroqWhisperClient:
                 audio_file = BytesIO(wav_bytes)
                 audio_file.name = "audio.wav"
                 
-                # Вызываем API
+                # Вызываем API с auto-detect language (убрали language=self.language для определения русского)
                 response = await asyncio.to_thread(
                     self.client.audio.transcriptions.create,
                     model=self.model,
                     file=audio_file,
-                    language=self.language,
-                    temperature=self.temperature
+                    # language parameter removed for auto-detection
+                    temperature=self.temperature,
+                    response_format="verbose_json"  # Needed to get detected language
                 )
-                
+
+                # Extract detected language from response (Groq returns it in verbose mode)
+                detected_lang = getattr(response, 'language', 'unknown')
+
                 result = {
                     "text": response.text.strip(),
-                    "language": self.language
+                    "language": detected_lang
                 }
                 
                 self.logger.info(f"Transcribed: {len(result['text'])} chars")

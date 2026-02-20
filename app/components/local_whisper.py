@@ -84,10 +84,11 @@ class LocalWhisperClient:
             for attempt in range(max_attempts):
                 try:
                     # Запускаем транскрипцию (синхронно, но через to_thread)
+                    # language=None для автоматического определения языка (нужно для блокировки русского)
                     segments, info = await asyncio.to_thread(
                         self.model.transcribe,
                         audio_array,
-                        language=self.language,
+                        language=None,  # Auto-detect language (was: self.language = "en")
                         beam_size=5,
                         vad_filter=True,
                         vad_parameters=dict(

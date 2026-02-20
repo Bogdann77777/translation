@@ -159,6 +159,12 @@ class BatchQueue:
             # process_batch использует пошаговые semaphores внутри
             processed = await self.process_batch(audio_array)
 
+            # Если process_batch вернул None (напр. русская речь) - пропускаем
+            if processed is None:
+                self.logger.debug("Batch processing returned None (skipped) - releasing semaphore")
+                self.pipeline_semaphore.release()  # Освобождаем слот сразу
+                return
+
             # Помечаем, что этот батч захватил pipeline_semaphore
             # (нужно освободить после воспроизведения)
             processed['_pipeline_semaphore_acquired'] = True
@@ -392,6 +398,22 @@ class BatchQueue:
                 stt_duration = time.time() - start
                 self.metrics.record_latency("stt", stt_duration)
                 self.logger.debug(f"STT completed in {stt_duration:.2f}s")
+
+            # БЛОКИРОВКА РУССКОЙ РЕЧИ: Если обнаружен русский язык - пропускаем перевод
+            detected_lang = transcription.get("language", "unknown").lower()
+            if detected_lang in ["ru", "russian", "rus"]:
+                self.logger.warning(f"⛔ Russian speech detected - SKIPPING translation: '{transcription['text'][:50]}...'")
+
+                # Отправляем уведомление в UI
+                await self.websocket.send_json({
+                    "type": "russian_detected",
+                    "text": transcription["text"],
+                    "message": "Russian speech detected - translation skipped",
+                    "timestamp": time.time()
+                })
+
+                # Завершаем обработку - не переводим, не озвучиваем
+                return None
 
             # STEP 2: Translation (OpenRouter + context + topic)
             # Только 1 батч может переводить одновременно

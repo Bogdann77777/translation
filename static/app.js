@@ -134,6 +134,12 @@ function handleMessage(message) {
             updateMetrics(data);
             break;
 
+        case 'russian_detected':
+            console.warn('[MSG] Russian speech detected:', message.text.substring(0, 100));
+            // Show warning in Russian text box
+            appendTranscript('russianText', '⛔ [Обнаружена русская речь - перевод пропущен]');
+            break;
+
         case 'error':
             console.error('[MSG] Server error:', message.message);
             break;
