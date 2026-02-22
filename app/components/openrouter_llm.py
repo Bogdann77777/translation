@@ -62,7 +62,10 @@ class OpenRouterClient:
         system_prompt = (
             "Translate English to Russian CONCISELY. Keep translations SHORT - same length as original or shorter. "
             "Use natural Russian but DON'T add explanations or extra words. "
-            "Output ONLY the translation, no formatting, no markdown."
+            "Output ONLY the translation, no formatting, no markdown.\n\n"
+            "PROFANITY POLICY: If source contains profanity/swearing, SOFTEN it with euphemisms. "
+            "Replace explicit profanity with milder substitutes (e.g., 'черт', 'твою мать', 'елки-палки', etc). "
+            "Keep the emotional tone but make language family-friendly. DO NOT translate profanity literally."
         )
         
         # Формируем user message
