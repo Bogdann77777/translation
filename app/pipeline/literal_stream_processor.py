@@ -47,14 +47,13 @@ class LiteralStreamProcessor:
         self.lock = asyncio.Lock()
 
         # ПАРАМЕТРЫ БЫСТРОГО РЕЖИМА
-        self.min_chunk_duration = 1.5  # Минимум 1.5 секунды (максимально быстрая реакция)
-        self.max_chunk_duration = 4.0  # Максимум 4 секунды (не накапливаем долго)
-        self.min_silence_duration = 0.15  # 0.15 сек тишины = разрыв (очень быстрая реакция)
+        self.min_chunk_duration = 1.5  # Минимум 1.5 секунды
+        self.max_chunk_duration = 4.0  # Максимум 4 секунды - ПРИНУДИТЕЛЬНОЕ закрытие
+        self.min_silence_duration = 1.0  # 1.0 секунда тишины = закрыть чанк
 
         self.logger.info(
-            f"LiteralStreamProcessor initialized (FAST mode: "
-            f"{self.min_chunk_duration}-{self.max_chunk_duration}s chunks, "
-            f"pause: {self.min_silence_duration}s)"
+            f"LiteralStreamProcessor: chunks {self.min_chunk_duration}-{self.max_chunk_duration}s, "
+            f"silence {self.min_silence_duration}s"
         )
 
     async def process_chunk(self, audio_bytes: bytes) -> None:
@@ -81,9 +80,9 @@ class LiteralStreamProcessor:
             # Начало новой фразы
             if is_speech and self.phrase_start_time is None:
                 self.phrase_start_time = time.time()
-                self.logger.info(
-                    f"🎤 New phrase (FAST mode: {self.min_chunk_duration}s min, "
-                    f"pause: {self.min_silence_duration}s)"
+                self.logger.debug(
+                    f"🎤 New phrase (max {self.max_chunk_duration}s, "
+                    f"forced closure at {self.max_chunk_duration}s)"
                 )
 
             should_finalize = False
@@ -103,6 +102,15 @@ class LiteralStreamProcessor:
                     self.logger.info(
                         f"✂️ FAST chunk FORCED: {phrase_duration:.1f}s "
                         f"(max {self.max_chunk_duration}s)"
+                    )
+                    should_finalize = True
+
+                # EMERGENCY STOP: Если чанк стал слишком большим (> 10s), финализировать немедленно
+                # (Защита от "жирных чанков" из-за багов VAD или непрерывной речи)
+                if phrase_duration >= 10.0:
+                    self.logger.warning(
+                        f"⚠️ EMERGENCY: Fat chunk detected ({phrase_duration:.1f}s) - "
+                        f"forcing finalization NOW!"
                     )
                     should_finalize = True
 
@@ -137,7 +145,12 @@ class LiteralStreamProcessor:
         Args:
             phrase_data: Список аудио семплов
         """
-        min_samples = int(self.vad.min_speech_duration * self.sample_rate)
+        import time
+        finalize_start = time.time()
+
+        # КРИТИЧНО: Используем self.min_chunk_duration (1.5s) вместо self.vad.min_speech_duration (3.0s)
+        # Иначе чанки < 3.0s будут отбрасываться!
+        min_samples = int(self.min_chunk_duration * self.sample_rate)
 
         if len(phrase_data) < min_samples:
             self.logger.debug(
@@ -149,9 +162,18 @@ class LiteralStreamProcessor:
         phrase_array = normalize_audio(phrase_array)
 
         duration = len(phrase_array) / self.sample_rate
+
+        # Detailed finalization log
+        current_time = time.strftime('%H:%M:%S')
         self.logger.info(
-            f"=== FAST CHUNK FINALIZED: {duration:.1f}s ({len(phrase_array)} samples) ==="
+            f"\n╔═══ CHUNK FINALIZED [{current_time}] ═══╗\n"
+            f"║ Duration: {duration:.1f}s\n"
+            f"║ Samples: {len(phrase_array)}\n"
+            f"╚{'═' * 40}╝"
         )
 
         # Отправляем в очередь обработки
         await self.batch_queue.add_batch(phrase_array)
+
+        finalize_time = time.time() - finalize_start
+        self.logger.debug(f"  → Finalize took {finalize_time*1000:.1f}ms")

@@ -75,15 +75,21 @@ class XTTSEngine:
         - GPU ускорение
     """
     
-    def __init__(self):
-        """Инициализация TTS движка."""
+    def __init__(self, device_override: Optional[str] = None, gpu_id_override: Optional[int] = None):
+        """
+        Инициализация TTS движка.
+
+        Args:
+            device_override: Override device from config (for worker pool)
+            gpu_id_override: Override GPU ID from config (for worker pool)
+        """
         self.config = load_config()["models"]["tts"]
         self.logger = setup_logger(__name__)
 
         try:
-            # Загружаем модель
-            self.device = self.config["device"]
-            self.gpu_id = self.config.get("gpu_id", 1)  # GPU 1 по умолчанию для TTS
+            # Загружаем модель (with override support for worker pool)
+            self.device = device_override if device_override is not None else self.config["device"]
+            self.gpu_id = gpu_id_override if gpu_id_override is not None else self.config.get("gpu_id", 1)
 
             self.logger.info(f"Starting XTTS initialization: device={self.device}, gpu_id={self.gpu_id}")
 

@@ -69,14 +69,14 @@ async def startup_preload_models():
     except Exception as e:
         logger.error(f"[1/3] Whisper load FAILED: {e}")
 
-    # 2. Load XTTS (TTS)
-    logger.info("[2/3] Loading XTTS model...")
+    # 2. Load TTS Worker Pool (2 workers on GPU 0 and GPU 1)
+    logger.info("[2/3] Loading TTS Worker Pool (2 workers)...")
     try:
-        from app.components.xtts_engine import XTTSEngine
-        preloaded_tts = XTTSEngine()
-        logger.info("[2/3] XTTS loaded OK")
+        from app.components.tts_worker_pool import TTSWorkerPool
+        preloaded_tts = TTSWorkerPool(num_workers=2)
+        logger.info("[2/3] TTS Worker Pool loaded OK (2 workers ready)")
     except Exception as e:
-        logger.error(f"[2/3] XTTS load FAILED: {e}")
+        logger.error(f"[2/3] TTS Worker Pool load FAILED: {e}")
 
     # 3. Load OpenRouter client (LLM)
     logger.info("[3/3] Loading OpenRouter client...")
@@ -159,10 +159,13 @@ async def get_voices():
     # Sort by name
     voices.sort(key=lambda x: x["name"])
 
-    # Mark current voice
+    # Mark current voice (from config, not from preloaded pool)
     current_voice = None
-    if preloaded_tts:
-        current_voice = preloaded_tts.voice_sample
+    try:
+        tts_config = config["models"]["tts"]
+        current_voice = tts_config.get("voice_sample")
+    except:
+        pass
 
     return JSONResponse({
         "voices": voices,
@@ -217,19 +220,31 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "set_speed":
                 new_speed = message.get("speed", 1.0)
-                logger.info(f"Setting TTS speed to {new_speed}x")
-                if preloaded_tts:
+                logger.info(f"Set speed request: {new_speed}x")
+                # Note: Dynamic speed change not supported with TTSWorkerPool (requires restart)
+                # Only works with legacy single XTTS engine
+                from app.components.tts_worker_pool import TTSWorkerPool
+                if preloaded_tts and not isinstance(preloaded_tts, TTSWorkerPool):
                     preloaded_tts.speed = new_speed
+                    logger.info(f"Speed changed to {new_speed}x")
+                else:
+                    logger.warning("Dynamic speed change not supported with TTS Worker Pool (change config.yaml and restart)")
 
             elif msg_type == "set_voice":
                 new_voice = message.get("voice", "")
-                logger.info(f"Switching voice to: {new_voice}")
-                if preloaded_tts and new_voice:
+                logger.info(f"Set voice request: {new_voice}")
+                # Note: Dynamic voice change not supported with TTSWorkerPool (requires restart)
+                # Only works with legacy single XTTS engine
+                from app.components.tts_worker_pool import TTSWorkerPool
+                if preloaded_tts and new_voice and not isinstance(preloaded_tts, TTSWorkerPool):
                     preloaded_tts.voice_sample = new_voice
                     await websocket.send_json({
                         "type": "voice_changed",
                         "voice": new_voice
                     })
+                    logger.info(f"Voice changed to {new_voice}")
+                else:
+                    logger.warning("Dynamic voice change not supported with TTS Worker Pool (change config.yaml and restart)")
 
             else:
                 logger.warning(f"Unknown message type: {msg_type}")
@@ -282,5 +297,8 @@ if __name__ == "__main__":
         app,
         host=server_config["host"],
         port=server_config["port"],
-        log_level="info"
+        log_level="info",
+        timeout_keep_alive=86400,  # 24 hours - effectively unlimited (movies can have long silent scenes)
+        ws_ping_interval=None,     # Disable auto-ping - user controls disconnect via Stop button
+        ws_ping_timeout=None       # No timeout - connection stays alive until user stops
     )

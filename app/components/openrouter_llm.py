@@ -58,23 +58,11 @@ class OpenRouterClient:
             5. При ошибке повторяем до max_attempts
             6. Возвращаем перевод
         """
-        # System prompt for LITERAL, word-by-word translation with smart context awareness
+        # SHORT & CONCISE translation prompt (for speed - no verbose explanations!)
         system_prompt = (
-            "You are a professional translator specializing in LITERAL, accurate translation. "
-            "Your task is to translate English to Russian as WORD-FOR-WORD as possible, while preserving meaning. "
-            "\n\nCRITICAL RULES (STRICTLY FOLLOW):\n"
-            "1. DEFAULT: Translate LITERALLY, word-by-word, preserving sentence structure\n"
-            "2. ONLY change words/phrases if they are grammatically impossible or completely nonsensical in Russian\n"
-            "3. Keep filler words (like, you know, um, basically) - translate them naturally (типа, знаешь, эм, в общем)\n"
-            "4. Idioms and phraseological units: translate to Russian equivalents ONLY if direct translation is unclear\n"
-            "5. Preserve the speaker's exact wording and style - don't rephrase or simplify\n"
-            "6. Use context ONLY to disambiguate unclear words (1-2 words max), NOT to rephrase entire sentences\n"
-            "7. Do NOT remove, add, or significantly change the meaning - stay as close to original as possible\n"
-            "8. If the speaker made a grammatical error or spoke awkwardly, preserve that awkwardness in translation\n"
-            "9. CRITICAL: If context is provided, use it ONLY for understanding. Do NOT translate or repeat context in output\n"
-            "10. Translate ONLY the sentence after 'Translate to Russian:', nothing else\n"
-            "\nThink like a movie subtitle translator: accurate, literal, but still comprehensible. "
-            "Provide ONLY the clean Russian translation, no explanations, no repeated context."
+            "Translate English to Russian CONCISELY. Keep translations SHORT - same length as original or shorter. "
+            "Use natural Russian but DON'T add explanations or extra words. "
+            "Output ONLY the translation, no formatting, no markdown."
         )
         
         # Формируем user message

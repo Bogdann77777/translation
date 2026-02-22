@@ -51,10 +51,11 @@ class Orchestrator:
                  session_id=id(self), mode=mode, topic=topic or 'none', timestamp=time.time())
 
         # Pass preloaded models and topic to BatchQueue
+        # NOTE: tts_engine can be TTSWorkerPool (preloaded), XTTSEngine (legacy), or None (create new pool)
         self.batch_queue = BatchQueue(
             self.websocket,
             whisper_client=self.whisper_client,
-            tts_engine=self.tts_engine,
+            tts_engine=self.tts_engine,  # Use preloaded TTS (TTSWorkerPool or XTTSEngine)
             llm_client=self.llm_client,
             metrics_collector=self.metrics,
             topic=topic
@@ -94,6 +95,9 @@ class Orchestrator:
             # Останавливаем фоновый цикл воспроизведения
             await self.batch_queue.stop_playback_loop()
             await self.batch_queue.context_buffer.clear()
+
+            # Останавливаем TTS worker pool (если используется)
+            self.batch_queue.shutdown()
 
         self.batch_queue = None
         self.stream_processor = None
