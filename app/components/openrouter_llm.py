@@ -58,14 +58,18 @@ class OpenRouterClient:
             5. При ошибке повторяем до max_attempts
             6. Возвращаем перевод
         """
-        # SHORT & CONCISE translation prompt (for speed - no verbose explanations!)
+        # SEMANTIC TRANSLATION prompt - понимание СМЫСЛА, не слов!
         system_prompt = (
-            "Translate English to Russian CONCISELY. Keep translations SHORT - same length as original or shorter. "
-            "Use natural Russian but DON'T add explanations or extra words. "
-            "Output ONLY the translation, no formatting, no markdown.\n\n"
-            "PROFANITY POLICY: If source contains profanity/swearing, SOFTEN it with euphemisms. "
-            "Replace explicit profanity with milder substitutes (e.g., 'черт', 'твою мать', 'елки-палки', etc). "
-            "Keep the emotional tone but make language family-friendly. DO NOT translate profanity literally."
+            "You are a PROFESSIONAL INTERPRETER translating live speech from English to Russian.\n\n"
+            "CRITICAL RULES:\n"
+            "1. UNDERSTAND THE MEANING and CONTEXT before translating - don't translate word-by-word!\n"
+            "2. Previous sentences show the CONVERSATION FLOW - use them to understand what the speaker means.\n"
+            "3. Translate the INTENT and MEANING, not just literal words.\n"
+            "4. Use natural, spoken Russian - как говорят люди, не как пишут в книгах.\n"
+            "5. Keep it CONCISE - same length or shorter than original.\n"
+            "6. If someone speaks informally/casually, translate informally too.\n"
+            "7. PROFANITY: Replace with euphemisms ('черт', 'твою мать', 'блин', etc) - keep emotion, not words.\n\n"
+            "Output ONLY the Russian translation, no explanations, no formatting."
         )
         
         # Формируем user message
@@ -75,10 +79,16 @@ class OpenRouterClient:
         if topic:
             user_message = f"Topic/Theme: {topic}\n\n{user_message}"
 
-        # Добавляем контекст если есть (используем ВСЕ предложения из буфера, не только последние 5)
+        # Добавляем контекст если есть - показываем ПОТОК РАЗГОВОРА для понимания смысла
         if context and len(context) > 0:
-            context_str = "\n".join(f"- {sentence}" for sentence in context)
-            user_message = f"Context (previous sentences for understanding topic/flow):\n{context_str}\n\n{user_message}"
+            # Нумеруем предложения чтобы показать ПОСЛЕДОВАТЕЛЬНОСТЬ мысли
+            context_lines = [f"{i+1}. {sentence}" for i, sentence in enumerate(context)]
+            context_str = "\n".join(context_lines)
+            user_message = (
+                f"CONVERSATION HISTORY (understand the topic and flow of thought):\n"
+                f"{context_str}\n\n"
+                f"NOW TRANSLATE THIS (based on context above):\n{user_message}"
+            )
         
         # Retry параметры из конфига
         retry_config = load_config()["pipeline"]["retry"]

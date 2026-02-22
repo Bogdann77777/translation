@@ -40,8 +40,8 @@ models:
 # PIPELINE ПАРАМЕТРЫ
 # ============================================
 pipeline:
-  context_window: 10
-  context_max_chars: 2000
+  context_window: 30  # Increased: больше контекста для понимания темы
+  context_max_chars: 6000  # Increased: до 6000 символов истории разговора
   batch_queue_size: 12  # Pipeline processing: 12 slots for fast parallel processing
   max_batch_duration: 15.0
   min_ready_chunks_before_start: 1  # TRUE STREAMING: Играть каждый чанк сразу как готов (no buffering)
