@@ -7,7 +7,7 @@ let mediaStream = null;
 let scriptNode = null;
 let isRecording = false;
 let currentSpeed = 1.3;
-let translationMode = 'literal'; // 'contextual' or 'literal' (default: literal for fast response)
+let translationMode = 'smart'; // 'smart', 'literal', or 'contextual' (default: smart = LocalAgreement-2)
 
 // ============================================
 // LOGGING TO HTML CONSOLE
@@ -134,10 +134,9 @@ function handleMessage(message) {
             updateMetrics(data);
             break;
 
-        case 'russian_detected':
-            console.warn('[MSG] Russian speech detected:', message.text.substring(0, 100));
-            // Show warning in Russian text box
-            appendTranscript('russianText', '⛔ [Обнаружена русская речь - перевод пропущен]');
+        case 'non_english_detected':
+            console.warn('[MSG] Russian speech detected - skipping:', message.text.substring(0, 100));
+            appendTranscript('russianText', '⛔ [Русская речь — перевод пропущен]');
             break;
 
         case 'error':
@@ -162,16 +161,18 @@ function playAudio(base64Audio) {
     for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
     }
-    
+
     // Создаём AudioContext если нужно
     if (!audioContext) {
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
     }
-    
+
     // Декодируем WAV
     audioContext.decodeAudioData(bytes.buffer, (audioBuffer) => {
         const source = audioContext.createBufferSource();
         source.buffer = audioBuffer;
+        // Применяем скорость воспроизведения из слайдера
+        source.playbackRate.value = currentSpeed;
         source.connect(audioContext.destination);
         source.start(0);
     }).catch(err => {
@@ -509,6 +510,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log('[SPEED] Updated to', currentSpeed + 'x');
         }
     });
+
 
     // Voice selector
     const voiceSelect = document.getElementById('voiceSelect');

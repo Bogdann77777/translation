@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import re
 import time
 import base64
 import numpy as np
@@ -182,6 +183,173 @@ class BatchQueue:
         )
         asyncio.create_task(self._process_batch_async(audio_array, chunk_id))
 
+    async def add_text_batch(self, text: str) -> None:
+        """
+        Добавляет предтранскрибированный текст в очередь (SMART MODE).
+
+        Пропускает Whisper STT — текст уже готов от LocalAgreement-2.
+        Идёт напрямую в Translation → TTS pipeline.
+
+        Args:
+            text: Confirmed English text from LocalAgreement-2 processor
+        """
+        if not text or len(text.strip()) < 3:
+            self.logger.debug(f"Skipping empty/short text batch: '{text}'")
+            return
+
+        if self.pipeline_semaphore._value == 0:
+            self.logger.warning(
+                f"⚠️ Pipeline FULL - waiting for free slot... "
+                f"(processing: {self.processing_count}, ready: {self.ready_queue.qsize()})"
+            )
+
+        await self.pipeline_semaphore.acquire()
+
+        async with self.processing_lock:
+            self.chunk_counter += 1
+            chunk_id = self.chunk_counter
+            self.processing_count += 1
+
+        current_time = time.strftime('%H:%M:%S')
+        self.logger.info(
+            f"\n╔═══ CHUNK #{chunk_id} TEXT QUEUED [{current_time}] ═══╗\n"
+            f"║ Text: {text[:80]}\n"
+            f"║ Processing: {self.processing_count}\n"
+            f"║ Ready queue: {self.ready_queue.qsize()}\n"
+            f"╚{'═' * 40}╝"
+        )
+        asyncio.create_task(self._process_text_batch_async(text, chunk_id))
+
+    async def _process_text_batch_async(self, text: str, chunk_id: int) -> None:
+        """
+        Фоновая обработка предтранскрибированного текста (SMART MODE).
+
+        Translation → TTS, без Whisper шага.
+        Использует ту же sequential chunk ID систему что и _process_batch_async.
+        """
+        try:
+            processed = await self.process_text_batch(text, chunk_id)
+
+            if processed is None:
+                self.pipeline_semaphore.release()
+                self.completed_chunks_buffer[chunk_id] = None
+                await self._advance_sequential_queue()
+                return
+
+            processed['_pipeline_semaphore_acquired'] = True
+            self.completed_chunks_buffer[chunk_id] = processed
+            await self._advance_sequential_queue()
+
+        except Exception as e:
+            self.logger.error(f"Text batch processing failed: {e}")
+            self.metrics.record_error("text_batch_processing", str(e))
+            self.pipeline_semaphore.release()
+            self.completed_chunks_buffer[chunk_id] = None
+            await self._advance_sequential_queue()
+
+        finally:
+            async with self.processing_lock:
+                self.processing_count -= 1
+
+    async def process_text_batch(self, text: str, chunk_id: int) -> Dict[str, Any]:
+        """
+        Обрабатывает предтранскрибированный текст через Translation → TTS.
+
+        SMART MODE: Whisper шаг пропускается (текст уже готов от LocalAgreement-2).
+        Включает ту же логику фильтрации русского языка по ключевым словам.
+
+        Args:
+            text: Confirmed English text from LocalAgreement-2
+            chunk_id: Chunk ID for sequential ordering
+
+        Returns:
+            Dict с результатами или None если пропущено
+        """
+        try:
+            pipeline_start = time.time()
+
+            self.logger.info(
+                f"🧠 Chunk #{chunk_id} SMART: '{text[:80]}'"
+            )
+
+            # Basic validation (LocalAgreement already filters noise)
+            stt_text = text.strip()
+            if len(stt_text) < 3:
+                self.logger.warning(f"⛔ Chunk #{chunk_id}: text too short - skipping")
+                return None
+
+            # STEP 1: Translation (OpenRouter + context + topic)
+            async with self.translation_semaphore:
+                start = time.time()
+                self.logger.info(f"🌐 Chunk #{chunk_id} → TRANSLATION (smart mode)...")
+                context = await self.context_buffer.get_context()
+                translation = await self.openrouter_client.translate(
+                    stt_text, context, topic=self.topic
+                )
+                translation_duration = time.time() - start
+                self.metrics.record_latency("translation", translation_duration)
+
+                # Strip markdown artifacts
+                translation = re.sub(r'\*\*(.+?)\*\*', r'\1', translation)
+                translation = translation.replace('*', '').replace('`', '').strip()
+
+                self.logger.info(
+                    f"   ✅ TRANSLATION done: {translation_duration:.2f}s\n"
+                    f"   🔤 LLM FULL: \"{translation}\""
+                )
+                self.logger.info(
+                    f"[ANALYSIS] chunk=#{chunk_id} lang=smart\n"
+                    f"  EN: {stt_text}\n"
+                    f"  RU: {translation}"
+                )
+
+                await self.context_buffer.add_pair(stt_text, translation)
+
+            # STEP 2: TTS (Worker Pool)
+            start = time.time()
+            self.logger.info(f"🔊 Chunk #{chunk_id} → TTS (smart mode)...")
+
+            if self.tts_worker_pool:
+                audio_bytes = await self.tts_worker_pool.synthesize(translation)
+            else:
+                audio_bytes = await self.xtts_engine.synthesize(translation)
+
+            tts_duration = time.time() - start
+            self.metrics.record_latency("tts", tts_duration)
+
+            # Calculate audio duration from WAV header
+            tts_config = load_config()["models"]["tts"]
+            tts_sample_rate = tts_config.get("output_sample_rate", 24000)
+            audio_data_size = len(audio_bytes) - 44
+            audio_duration = audio_data_size / (tts_sample_rate * 2)
+
+            e2e_duration = time.time() - pipeline_start
+            self.metrics.record_latency("e2e", e2e_duration)
+
+            self.logger.info(
+                f"\n╔═══ CHUNK #{chunk_id} SMART PIPELINE COMPLETE ═══╗\n"
+                f"║ OUTPUT: {audio_duration:.1f}s TTS\n"
+                f"║ TRANSLATION: {translation_duration:.2f}s\n"
+                f"║ TTS:         {tts_duration:.2f}s\n"
+                f"║ E2E:         {e2e_duration:.2f}s\n"
+                f"║ Ready queue: {self.ready_queue.qsize()} chunks\n"
+                f"╚{'═' * 40}╝"
+            )
+
+            return {
+                "chunk_id": chunk_id,
+                "original": stt_text,
+                "translated": translation,
+                "audio": audio_bytes,
+                "duration": audio_duration,
+                "timestamp": time.time()
+            }
+
+        except Exception as e:
+            self.metrics.record_error("text_batch_processing", str(e))
+            self.logger.error(f"Text batch processing failed: {e}")
+            raise
+
     def _calculate_adaptive_speed(self, queue_size: int) -> float:
         """
         Вычисляет adaptive TTS speed на основе размера очереди.
@@ -214,6 +382,51 @@ class BatchQueue:
             ratio = (queue_size - low_threshold) / (high_threshold - low_threshold)
             return min_speed + (max_speed - min_speed) * ratio
 
+    async def _advance_sequential_queue(self) -> None:
+        """
+        Продвигает очередь последовательного воспроизведения.
+
+        Перемещает готовые чанки из completed_chunks_buffer в ready_queue
+        строго по порядку (next_playback_chunk_id).
+
+        Пропущенные/неудавшиеся чанки помечены None в буфере —
+        они сдвигают счётчик без воспроизведения, чтобы pipeline не замерзал.
+        """
+        while self.next_playback_chunk_id in self.completed_chunks_buffer:
+            next_item = self.completed_chunks_buffer[self.next_playback_chunk_id]
+
+            if next_item is None:
+                # Пропущенный чанк (тишина, не-английский, ошибка) — просто сдвигаем счётчик
+                del self.completed_chunks_buffer[self.next_playback_chunk_id]
+                self.logger.info(
+                    f"⏭️ Sequential: skipped chunk #{self.next_playback_chunk_id} "
+                    f"(silence/non-EN/error) — pipeline continues"
+                )
+                self.next_playback_chunk_id += 1
+                continue
+
+            # Реальный чанк — перемещаем в ready_queue
+            next_batch = self.completed_chunks_buffer.pop(self.next_playback_chunk_id)
+
+            # QUEUE OVERFLOW PROTECTION
+            current_queue_size = self.ready_queue.qsize()
+            if current_queue_size >= self.max_ready_queue_size:
+                try:
+                    old_batch = self.ready_queue.get_nowait()
+                    self.ready_queue.task_done()
+                    if old_batch.get('_pipeline_semaphore_acquired'):
+                        self.pipeline_semaphore.release()
+                    self.logger.warning(
+                        f"⚠️ Queue OVERFLOW ({current_queue_size}/{self.max_ready_queue_size}) - "
+                        f"SKIPPED old chunk (duration: {old_batch.get('duration', 0):.1f}s)"
+                    )
+                except asyncio.QueueEmpty:
+                    pass
+
+            await self.ready_queue.put(next_batch)
+            self.logger.debug(f"Chunk #{self.next_playback_chunk_id} added to ready_queue (sequential order)")
+            self.next_playback_chunk_id += 1
+
     async def _process_batch_async(self, audio_array: np.ndarray, chunk_id: int) -> None:
         """
         Фоновая обработка батча через полный pipeline.
@@ -221,81 +434,50 @@ class BatchQueue:
         Обрабатывает батч (STT → LLM → TTS) и кладет результат в ready_queue.
         Выполняется полностью асинхронно, не блокируя другие батчи.
 
-        КОНВЕЙЕРНАЯ ОБРАБОТКА:
-        - Батч проходит через этапы: STT → Translation → TTS
-        - Каждый этап обрабатывает только 1 батч за раз (Semaphore)
-        - Разные батчи могут быть на разных этапах одновременно
+        КРИТИЧНО: При любом исходе (успех, пропуск, ошибка) chunk_id
+        добавляется в completed_chunks_buffer (None = пропущен), чтобы
+        sequential counter мог продвинуться и pipeline не замерзал.
 
         Args:
             audio_array: Numpy массив с аудио (float32, 16kHz)
             chunk_id: Уникальный ID чанка для отслеживания
         """
         try:
-            # Обрабатываем батч через полный pipeline (5-10 секунд)
-            # process_batch использует пошаговые semaphores внутри
             processed = await self.process_batch(audio_array, chunk_id)
 
-            # Если process_batch вернул None (напр. русская речь) - пропускаем
             if processed is None:
-                self.logger.debug("Batch processing returned None (skipped) - releasing semaphore")
-                self.pipeline_semaphore.release()  # Освобождаем слот сразу
+                # Чанк пропущен (тишина, не-английский язык и т.д.)
+                # КРИТИЧНО: вставляем None-сентинел чтобы sequential counter не застрял!
+                self.pipeline_semaphore.release()
+                self.completed_chunks_buffer[chunk_id] = None
+                await self._advance_sequential_queue()
                 return
 
-            # Помечаем, что этот батч захватил pipeline_semaphore
-            # (нужно освободить после воспроизведения)
+            # Реальный чанк — помечаем и добавляем в буфер
             processed['_pipeline_semaphore_acquired'] = True
-
-            # SEQUENTIAL PLAYBACK: Add chunk to buffer by chunk_id
-            chunk_id = processed.get('chunk_id', 0)
             self.completed_chunks_buffer[chunk_id] = processed
 
-            # Log if chunk completed out of order (will wait in buffer)
             if chunk_id != self.next_playback_chunk_id:
-                buffer_size = len(self.completed_chunks_buffer)
                 self.logger.info(
                     f"🔄 Chunk #{chunk_id} completed OUT OF ORDER "
                     f"(waiting for #{self.next_playback_chunk_id}). "
-                    f"Buffer: {buffer_size} chunks waiting"
+                    f"Buffer: {len(self.completed_chunks_buffer)} chunks waiting"
                 )
 
-            # Check if we can play next sequential chunks
-            # (This moves chunks from buffer to ready_queue in sequential order)
-            while self.next_playback_chunk_id in self.completed_chunks_buffer:
-                next_batch = self.completed_chunks_buffer.pop(self.next_playback_chunk_id)
-
-                # QUEUE OVERFLOW PROTECTION
-                current_queue_size = self.ready_queue.qsize()
-                if current_queue_size >= self.max_ready_queue_size:
-                    # Skip old chunk
-                    try:
-                        old_batch = self.ready_queue.get_nowait()
-                        self.ready_queue.task_done()
-                        if old_batch.get('_pipeline_semaphore_acquired'):
-                            self.pipeline_semaphore.release()
-                        self.logger.warning(
-                            f"⚠️ Queue OVERFLOW ({current_queue_size}/{self.max_ready_queue_size}) - "
-                            f"SKIPPED old chunk (duration: {old_batch.get('duration', 0):.1f}s)"
-                        )
-                    except asyncio.QueueEmpty:
-                        pass
-
-                # Add to ready_queue in sequential order
-                await self.ready_queue.put(next_batch)
-                self.next_playback_chunk_id += 1
-
-                self.logger.debug(f"Chunk #{chunk_id} added to ready_queue (sequential order)")
-
+            await self._advance_sequential_queue()
             self.logger.debug("Batch processed and queued for playback")
 
         except Exception as e:
             self.logger.error(f"Background batch processing failed: {e}")
             self.metrics.record_error("batch_processing_async", str(e))
 
-            # При ошибке ОСВОБОЖДАЕМ semaphore сразу (батч не дойдет до playback)
+            # КРИТИЧНО: освобождаем semaphore И вставляем None-сентинел
+            # чтобы sequential counter продвинулся и pipeline не замерзал
             self.pipeline_semaphore.release()
+            self.completed_chunks_buffer[chunk_id] = None
+            await self._advance_sequential_queue()
 
         finally:
-            # Уменьшаем счетчик обрабатываемых батчей
             async with self.processing_lock:
                 self.processing_count -= 1
 
@@ -553,27 +735,49 @@ class BatchQueue:
                 transcription = await self.whisper_client.transcribe(audio_array)
                 stt_duration = time.time() - start
                 self.metrics.record_latency("stt", stt_duration)
-                self.logger.info(f"   ✅ WHISPER done: {stt_duration:.2f}s → \"{transcription['text'][:60]}...\"")
-
-            # БЛОКИРОВКА НЕ-АНГЛИЙСКОЙ РЕЧИ: Переводим ТОЛЬКО английский, всё остальное игнорируем
-            # (Пример: разговор с женой на русском не должен попадать в переводчик)
-            detected_lang = transcription.get("language", "unknown").lower()
-            if detected_lang not in ["en", "english"]:
-                self.logger.warning(
-                    f"⛔ Non-English speech detected ({detected_lang}) - SKIPPING translation: "
-                    f"'{transcription['text'][:50]}...'"
+                lang_label = transcription.get("language", "?")
+                lang_conf = transcription.get("language_probability", 0)
+                self.logger.info(
+                    f"   ✅ WHISPER done: {stt_duration:.2f}s "
+                    f"(lang={lang_label}, conf={lang_conf:.2f})\n"
+                    f"   📝 STT FULL: \"{transcription['text']}\""
                 )
 
-                # Отправляем уведомление в UI
+            # ФИЛЬТР ЯЗЫКА: главный язык — английский, но переводим всё кроме русского.
+            # Русский пропускаем ТОЛЬКО если Whisper уверен (confidence > 0.80).
+            # Это предотвращает случайный пропуск английской речи с низкой уверенностью.
+            detected_lang = transcription.get("language", "unknown").lower()
+            lang_prob = transcription.get("language_probability", 1.0)
+
+            is_russian = detected_lang in ["ru", "russian"]
+            high_confidence = lang_prob >= 0.80
+
+            if is_russian and high_confidence:
+                self.logger.warning(
+                    f"⛔ Russian detected (confidence: {lang_prob:.2f}) - SKIPPING: "
+                    f"'{transcription['text'][:80]}'"
+                )
                 await self.websocket.send_json({
                     "type": "non_english_detected",
                     "text": transcription["text"],
                     "language": detected_lang,
-                    "message": f"Non-English speech detected ({detected_lang}) - translation skipped",
+                    "message": f"Russian speech detected - translation skipped",
                     "timestamp": time.time()
                 })
+                return None
+            elif is_russian and not high_confidence:
+                self.logger.info(
+                    f"⚠️ Russian detected but LOW confidence ({lang_prob:.2f}) — treating as foreign, translating"
+                )
 
-                # Завершаем обработку - не переводим, не озвучиваем
+            # ЗАЩИТА ОТ ГАЛЛЮЦИНАЦИИ: пропускаем пустой/тривиальный STT вывод
+            # Если Whisper вернул < 3 символов — LLM будет фантазировать из контекста
+            stt_text = transcription["text"].strip()
+            if len(stt_text) < 3:
+                self.logger.warning(
+                    f"⛔ Chunk #{chunk_id}: STT too short ('{stt_text}', {len(stt_text)} chars) "
+                    f"— skipping to prevent LLM hallucination"
+                )
                 return None
 
             # STEP 2: Translation (OpenRouter + context + topic)
@@ -582,14 +786,29 @@ class BatchQueue:
                 self.logger.info(f"🌐 Chunk #{chunk_id} → TRANSLATION...")
                 context = await self.context_buffer.get_context()
                 translation = await self.openrouter_client.translate(
-                    transcription["text"], context, topic=self.topic
+                    stt_text, context, topic=self.topic
                 )
                 translation_duration = time.time() - start
                 self.metrics.record_latency("translation", translation_duration)
-                self.logger.info(f"   ✅ TRANSLATION done: {translation_duration:.2f}s → \"{translation[:60]}...\"")
 
-                # Добавляем в контекст (для следующих переводов)
-                await self.context_buffer.add_sentence(transcription["text"])
+                # STRIP MARKDOWN: убираем **bold** и другие маркеры перед TTS
+                translation = re.sub(r'\*\*(.+?)\*\*', r'\1', translation)
+                translation = translation.replace('*', '').replace('`', '').strip()
+
+                self.logger.info(
+                    f"   ✅ TRANSLATION done: {translation_duration:.2f}s\n"
+                    f"   🔤 LLM FULL: \"{translation}\""
+                )
+                # ANALYSIS строка — легко парсить для сравнения STT vs LLM
+                self.logger.info(
+                    f"[ANALYSIS] chunk=#{chunk_id} lang={transcription.get('language','?')} "
+                    f"conf={transcription.get('language_probability',0):.2f}\n"
+                    f"  EN: {transcription['text']}\n"
+                    f"  RU: {translation}"
+                )
+
+                # Добавляем EN+RU пару в контекст (для живого нарратива)
+                await self.context_buffer.add_pair(transcription["text"], translation)
 
             # STEP 3: TTS (Worker Pool - parallel processing on 2 GPUs)
             start = time.time()
