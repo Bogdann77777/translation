@@ -6,7 +6,7 @@ let audioContext = null;
 let mediaStream = null;
 let scriptNode = null;
 let isRecording = false;
-let currentSpeed = 1.3;
+let currentSpeed = 1.0; // XTTS speed (1.0 = normal, 2.0 = max without distortion). Browser playbackRate NOT used.
 let translationMode = 'smart'; // 'smart', 'literal', or 'contextual' (default: smart = LocalAgreement-2)
 
 // ============================================
@@ -171,8 +171,9 @@ function playAudio(base64Audio) {
     audioContext.decodeAudioData(bytes.buffer, (audioBuffer) => {
         const source = audioContext.createBufferSource();
         source.buffer = audioBuffer;
-        // Применяем скорость воспроизведения из слайдера
-        source.playbackRate.value = currentSpeed;
+        // NOTE: playbackRate intentionally NOT set here.
+        // Changing playbackRate also changes pitch → distorted voice.
+        // Speed is controlled server-side via XTTS speed parameter (no distortion).
         source.connect(audioContext.destination);
         source.start(0);
     }).catch(err => {

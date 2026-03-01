@@ -170,10 +170,17 @@ class SmartStreamProcessor:
         self.lock = asyncio.Lock()              # Protects audio_buffer and LocalAgreement state
         self._is_processing = False             # Prevents concurrent Whisper runs
 
+        # Sentence accumulation buffer: collect committed words until complete sentence
+        # Prevents "Spain" / "that" / "of course" from becoming individual TTS chunks
+        self._pending_text = ""                 # Accumulated committed words not yet sent to TTS
+        self._pending_last_update = 0.0         # Timestamp of last update (for timeout flush)
+        self._min_sentence_chars = 40           # Min chars before considering a flush
+        self._sentence_timeout_sec = 6.0        # Force flush after this silence (safety net)
+
         self.logger.info(
             f"SmartStreamProcessor initialized: "
             f"min_chunk={min_chunk_size}s, buffer_trim={buffer_trimming_sec}s "
-            f"(LocalAgreement-2, no VAD cuts)"
+            f"(LocalAgreement-2, sentence buffering, no VAD cuts)"
         )
 
     async def process_chunk(self, audio_bytes: bytes) -> None:
@@ -211,7 +218,70 @@ class SmartStreamProcessor:
 
             if committed_text and committed_text.strip():
                 self.logger.info(f"🧠 LocalAgreement COMMITTED: '{committed_text.strip()}'")
-                await self.batch_queue.add_text_batch(committed_text.strip())
+                await self._accumulate_and_maybe_flush(committed_text.strip())
+
+        # Timeout flush: if pending text hasn't been flushed for _sentence_timeout_sec
+        # (covers case where speech ends mid-sentence with no terminal punctuation)
+        import time as _time
+        if (self._pending_text and
+                self._pending_last_update > 0 and
+                _time.time() - self._pending_last_update > self._sentence_timeout_sec):
+            await self._flush_pending("timeout")
+
+    async def _accumulate_and_maybe_flush(self, new_text: str) -> None:
+        """
+        Accumulate committed words until a complete sentence is formed.
+
+        Flush to translation+TTS when:
+        1. Text ends with sentence-terminal punctuation (. ? ! ...)
+        2. Accumulated text exceeds _min_sentence_chars and new_text ends sentence-ish
+        3. Timeout (_sentence_timeout_sec) — safety net for sentences without punctuation
+
+        This prevents 1-3 word commits like "Spain", "that", "of course"
+        from each becoming separate TTS chunks (which sound choppy and flood the queue).
+        """
+        import time as _time
+
+        # Append to pending buffer
+        if self._pending_text:
+            self._pending_text = self._pending_text + self.asr.sep + new_text
+        else:
+            self._pending_text = new_text
+        self._pending_last_update = _time.time()
+
+        pending = self._pending_text.strip()
+        total_chars = len(pending)
+
+        # Check for sentence-terminal punctuation
+        ends_sentence = pending.rstrip().endswith(('.', '?', '!', '...', '。', '！', '？'))
+
+        should_flush = False
+        flush_reason = ""
+
+        if ends_sentence:
+            should_flush = True
+            flush_reason = "sentence_end"
+        elif total_chars >= self._min_sentence_chars and any(c in new_text for c in '.?!,;'):
+            # Long enough AND ends with any pause marker — good cut point
+            should_flush = True
+            flush_reason = f"long_clause ({total_chars} chars)"
+        elif total_chars >= 120:
+            # Safety: never accumulate more than ~120 chars regardless
+            should_flush = True
+            flush_reason = f"max_length ({total_chars} chars)"
+
+        if should_flush:
+            await self._flush_pending(flush_reason)
+
+    async def _flush_pending(self, reason: str) -> None:
+        """Flush accumulated pending text to translation+TTS pipeline."""
+        if not self._pending_text or not self._pending_text.strip():
+            return
+        text = self._pending_text.strip()
+        self._pending_text = ""
+        self._pending_last_update = 0.0
+        self.logger.info(f"🧠 FLUSHING ({reason}): '{text}'")
+        await self.batch_queue.add_text_batch(text)
 
     async def _run_process_iter(self, audio_snapshot: np.ndarray, offset_snapshot: float) -> str:
         """
