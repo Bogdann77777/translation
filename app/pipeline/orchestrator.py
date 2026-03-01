@@ -64,15 +64,23 @@ class Orchestrator:
         # Выбираем процессор в зависимости от режима
         if mode == 'smart':
             from app.pipeline.smart_stream_processor import SmartStreamProcessor
-            # Reuse the already-loaded Whisper model (no double VRAM usage)
-            whisper_model = self.whisper_client.model
-            self.stream_processor = SmartStreamProcessor(
-                self.batch_queue,
-                whisper_model,
-                min_chunk_size=1.0,      # Run Whisper every 1s of new audio
-                buffer_trimming_sec=15.0 # Max 15s buffer before forced trim
-            )
-            self.logger.info("🧠 SMART mode: LocalAgreement-2 semantic chunking (Whisper segment boundaries)")
+            from app.components.local_whisper import LocalWhisperClient
+            # Smart mode requires local Whisper (needs .model attribute for direct access)
+            if not isinstance(self.whisper_client, LocalWhisperClient):
+                self.logger.warning("Smart mode requires local Whisper — falling back to literal mode")
+                mode = 'literal'
+                self.stream_processor = LiteralStreamProcessor(self.batch_queue)
+                self.logger.info("🚀 LITERAL mode (smart mode fallback)")
+            else:
+                # Reuse the already-loaded Whisper model (no double VRAM usage)
+                whisper_model = self.whisper_client.model
+                self.stream_processor = SmartStreamProcessor(
+                    self.batch_queue,
+                    whisper_model,
+                    min_chunk_size=1.0,      # Run Whisper every 1s of new audio
+                    buffer_trimming_sec=15.0  # Max 15s buffer before forced trim
+                )
+                self.logger.info("🧠 SMART mode: LocalAgreement-2 semantic chunking (Whisper segment boundaries)")
         elif mode == 'literal':
             self.stream_processor = LiteralStreamProcessor(self.batch_queue)
             self.logger.info("🚀 LITERAL mode: Fast processing (2-5s chunks, 0.2s pauses)")

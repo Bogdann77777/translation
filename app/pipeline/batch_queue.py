@@ -780,6 +780,26 @@ class BatchQueue:
                 )
                 return None
 
+            # ЗАЩИТА ОТ WHISPER REPETITION LOOP (hallucination guard)
+            # Симптом: Whisper генерирует один и тот же токен много раз подряд
+            # (известный баг Whisper при тишине/шуме/низкой уверенности)
+            # Детекция: >50% слов одинаковые И текст длиннее 20 симв/сек аудио
+            audio_duration_secs = len(audio_array) / 16000
+            chars_per_sec = len(stt_text) / max(audio_duration_secs, 0.1)
+            if chars_per_sec > 20:
+                words = stt_text.split()
+                if len(words) > 5:
+                    most_common_word = max(set(words), key=words.count)
+                    repetition_ratio = words.count(most_common_word) / len(words)
+                    if repetition_ratio > 0.5:
+                        self.logger.warning(
+                            f"⛔ WHISPER REPETITION HALLUCINATION: Chunk #{chunk_id} "
+                            f"has {repetition_ratio:.0%} repetition of '{most_common_word}' "
+                            f"({len(stt_text)} chars from {audio_duration_secs:.1f}s audio, "
+                            f"{chars_per_sec:.0f} chars/sec > threshold 20) — SKIPPING"
+                        )
+                        return None
+
             # STEP 2: Translation (OpenRouter + context + topic)
             async with self.translation_semaphore:
                 start = time.time()
