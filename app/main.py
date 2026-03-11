@@ -69,14 +69,21 @@ async def startup_preload_models():
     except Exception as e:
         logger.error(f"[1/3] Whisper load FAILED: {e}")
 
-    # 2. Load TTS Worker Pool (2 workers on GPU 0 and GPU 1)
-    logger.info("[2/3] Loading TTS Worker Pool (2 workers)...")
+    # 2. Load TTS (provider selected via TRANSLATOR_TTS_PROVIDER env var or config)
+    import os
+    tts_provider = os.environ.get("TRANSLATOR_TTS_PROVIDER") or config["models"]["tts"].get("provider", "xtts")
+    logger.info(f"[2/3] Loading TTS: provider={tts_provider}...")
     try:
-        from app.components.tts_worker_pool import TTSWorkerPool
-        preloaded_tts = TTSWorkerPool(num_workers=2)
-        logger.info("[2/3] TTS Worker Pool loaded OK (2 workers ready)")
+        if tts_provider == "fish_speech":
+            from app.components.fish_speech_engine import FishSpeechTTSPool
+            preloaded_tts = FishSpeechTTSPool()
+            logger.info("[2/3] FishSpeechTTSPool loaded OK")
+        else:
+            from app.components.tts_worker_pool import TTSWorkerPool
+            preloaded_tts = TTSWorkerPool(num_workers=2)
+            logger.info("[2/3] TTS Worker Pool loaded OK (2 workers ready)")
     except Exception as e:
-        logger.error(f"[2/3] TTS Worker Pool load FAILED: {e}")
+        logger.error(f"[2/3] TTS load FAILED: {e}")
 
     # 3. Load OpenRouter client (LLM)
     logger.info("[3/3] Loading OpenRouter client...")
@@ -221,14 +228,14 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "set_speed":
                 new_speed = message.get("speed", 1.0)
                 logger.info(f"Set speed request: {new_speed}x")
-                # Note: Dynamic speed change not supported with TTSWorkerPool (requires restart)
-                # Only works with legacy single XTTS engine
                 from app.components.tts_worker_pool import TTSWorkerPool
-                if preloaded_tts and not isinstance(preloaded_tts, TTSWorkerPool):
-                    preloaded_tts.speed = new_speed
+                if preloaded_tts:
+                    if isinstance(preloaded_tts, TTSWorkerPool):
+                        preloaded_tts.set_speed(new_speed)
+                    else:
+                        preloaded_tts.speed = new_speed
                     logger.info(f"Speed changed to {new_speed}x")
-                else:
-                    logger.warning("Dynamic speed change not supported with TTS Worker Pool (change config.yaml and restart)")
+                    await websocket.send_json({"type": "speed_changed", "speed": new_speed})
 
             elif msg_type == "set_voice":
                 new_voice = message.get("voice", "")
@@ -246,11 +253,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 else:
                     logger.warning("Dynamic voice change not supported with TTS Worker Pool (change config.yaml and restart)")
 
+            elif msg_type == "ping":
+                pass  # Keepalive heartbeat, no response needed
+
             else:
                 logger.warning(f"Unknown message type: {msg_type}")
 
     except WebSocketDisconnect:
-        logger.info(f"Client disconnected (processed {message_count} messages)")
+        import traceback as _tb
+        logger.warning(
+            f"⚡ WebSocketDisconnect after {message_count} messages. "
+            f"Stack:\n{''.join(_tb.format_stack())}"
+        )
         if orchestrator.session_active:
             logger.info("Stopping active session on disconnect")
             await orchestrator.stop_session()
@@ -299,6 +313,6 @@ if __name__ == "__main__":
         port=server_config["port"],
         log_level="info",
         timeout_keep_alive=86400,  # 24 hours - effectively unlimited (movies can have long silent scenes)
-        ws_ping_interval=None,     # Disable auto-ping - user controls disconnect via Stop button
-        ws_ping_timeout=None       # No timeout - connection stays alive until user stops
+        ws_ping_interval=20,       # Send WebSocket ping every 20s to keep connection alive
+        ws_ping_timeout=86400      # Never close on missing pong - session lives until user stops
     )

@@ -61,32 +61,20 @@ class Orchestrator:
             topic=topic
         )
 
-        # Выбираем процессор в зависимости от режима
-        if mode == 'smart':
-            from app.pipeline.smart_stream_processor import SmartStreamProcessor
-            from app.components.local_whisper import LocalWhisperClient
-            # Smart mode requires local Whisper (needs .model attribute for direct access)
-            if not isinstance(self.whisper_client, LocalWhisperClient):
-                self.logger.warning("Smart mode requires local Whisper — falling back to literal mode")
-                mode = 'literal'
-                self.stream_processor = LiteralStreamProcessor(self.batch_queue)
-                self.logger.info("🚀 LITERAL mode (smart mode fallback)")
-            else:
-                # Reuse the already-loaded Whisper model (no double VRAM usage)
-                whisper_model = self.whisper_client.model
-                self.stream_processor = SmartStreamProcessor(
-                    self.batch_queue,
-                    whisper_model,
-                    min_chunk_size=1.0,      # Run Whisper every 1s of new audio
-                    buffer_trimming_sec=15.0  # Max 15s buffer before forced trim
-                )
-                self.logger.info("🧠 SMART mode: LocalAgreement-2 semantic chunking (Whisper segment boundaries)")
-        elif mode == 'literal':
-            self.stream_processor = LiteralStreamProcessor(self.batch_queue)
-            self.logger.info("🚀 LITERAL mode: Fast processing (2-5s chunks, 0.2s pauses)")
+        # Выбираем процессор: SemanticBufferProcessor если есть LocalWhisper, иначе Literal fallback
+        from app.pipeline.semantic_buffer_processor import SemanticBufferProcessor
+        from app.components.local_whisper import LocalWhisperClient
+
+        if isinstance(self.whisper_client, LocalWhisperClient):
+            self.stream_processor = SemanticBufferProcessor(
+                self.batch_queue,
+                whisper_client=self.whisper_client
+            )
+            self.logger.info("🧠 SEMANTIC BUFFER mode: VAD chunks + smart text accumulation")
         else:
-            self.stream_processor = StreamProcessor(self.batch_queue)
-            self.logger.info("🎯 CONTEXTUAL mode: Quality processing (12-18s chunks, 1.0s pauses)")
+            # Fallback если нет local whisper
+            self.stream_processor = LiteralStreamProcessor(self.batch_queue)
+            self.logger.info("⚡ LITERAL fallback (no local whisper)")
 
         self.session_active = True
 
@@ -101,6 +89,11 @@ class Orchestrator:
     
     async def stop_session(self) -> None:
         """Останавливает сессию."""
+        import traceback as _tb
+        self.logger.warning(
+            f"⚡ STOP SESSION called. Active={self.session_active}. "
+            f"Caller stack:\n{''.join(_tb.format_stack())}"
+        )
         metrics_summary = self.metrics.get_summary()
         log_json(self.logger, "INFO", "Stopping session",
                  session_id=id(self),

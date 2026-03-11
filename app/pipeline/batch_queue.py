@@ -17,7 +17,7 @@ from app.components.groq_whisper import GroqWhisperClient
 from app.components.local_whisper import LocalWhisperClient
 from app.components.openrouter_llm import OpenRouterClient
 from app.components.xtts_engine import XTTSEngine
-from app.components.tts_worker_pool import TTSWorkerPool
+from app.components.tts_worker_pool import TTSWorkerPool, _apply_atempo
 
 
 class BatchQueue:
@@ -99,6 +99,7 @@ class BatchQueue:
         self.max_ready_queue_size = self.config.get("max_ready_queue_size", 10)  # Max chunks in queue
         self.ready_queue = asyncio.Queue()  # Очередь готовых батчей
         self.playback_task = None  # Фоновая задача воспроизведения
+        self.heartbeat_task = None  # Keepalive task (prevents browser from closing idle WS)
         self.is_running = False
 
         # SEQUENTIAL PLAYBACK: Buffer for out-of-order chunks
@@ -496,7 +497,8 @@ class BatchQueue:
 
         self.is_running = True
         self.playback_task = asyncio.create_task(self._playback_loop())
-        self.logger.info("Playback loop started")
+        self.heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self.logger.info("Playback loop started (heartbeat every 5s)")
 
     async def _playback_loop(self) -> None:
         """
@@ -533,6 +535,7 @@ class BatchQueue:
                     )
 
                 # Берем следующий готовый батч из очереди (ждем если пусто)
+                # Heartbeat keepalive runs in a separate _heartbeat_loop() task.
                 batch = await self.ready_queue.get()
 
                 # Логируем состояние очереди
@@ -555,9 +558,62 @@ class BatchQueue:
                 self.logger.info("Playback loop cancelled")
                 break
             except Exception as e:
-                self.logger.error(f"Playback loop error: {e}")
+                import traceback as _tb
+                err_str = str(e)
+                self.logger.error(
+                    f"🔴 Playback loop EXCEPTION: {type(e).__name__}: {err_str}\n"
+                    f"{''.join(_tb.format_exc())}"
+                )
+                # WebSocket closed — stop the loop instead of retrying
+                if (not err_str or "send" in err_str.lower() or
+                        "close" in err_str.lower() or "connect" in err_str.lower() or
+                        type(e).__name__ == "WebSocketDisconnect"):
+                    self.logger.warning(f"🔴 Playback loop: WebSocket closed ({type(e).__name__}), stopping loop")
+                    self.is_running = False
+                    break
+                self.logger.error(f"🔴 Playback loop non-WS error, continuing: {e}")
 
         self.logger.info("Playback loop stopped")
+
+    async def _heartbeat_loop(self) -> None:
+        """
+        Send keepalive heartbeat to browser every 5s.
+
+        Prevents browser from closing the WebSocket during silent gaps —
+        smart mode can have 5-15+ minutes of silence (movie use case).
+        Browser treats a connection with no server→client traffic as idle
+        and closes it. Heartbeat keeps it alive regardless of silence duration.
+        """
+        heartbeat_count = 0
+        loop_start = time.time()
+        self.logger.info("💓 Heartbeat loop STARTED")
+        while self.is_running:
+            await asyncio.sleep(5)
+            if not self.is_running:
+                break
+            heartbeat_count += 1
+            elapsed = time.time() - loop_start
+            try:
+                await self.websocket.send_json({"type": "heartbeat"})
+                self.logger.debug(f"💓 Heartbeat #{heartbeat_count} sent (session {elapsed:.0f}s elapsed)")
+            except Exception as e:
+                self.logger.error(
+                    f"💓 Heartbeat #{heartbeat_count} FAILED after {elapsed:.0f}s: "
+                    f"{type(e).__name__}: {e}"
+                )
+                # WebSocket closed — stop quietly
+                break
+        self.logger.info(f"💓 Heartbeat loop STOPPED (sent {heartbeat_count} heartbeats)")
+
+    def _get_adaptive_speed(self, queue_size: int) -> float:
+        """Адаптивная скорость воспроизведения на основе размера очереди готовых чанков."""
+        if queue_size >= 3:
+            return 2.0
+        if queue_size >= 2:
+            return 1.6
+        if queue_size >= 1:
+            return 1.3
+        return 1.0
 
     async def _play_batch(self, batch: Dict[str, Any]) -> None:
         """
@@ -601,11 +657,30 @@ class BatchQueue:
                 "timestamp": time.time()
             })
 
+            # --- Адаптивное ускорение (XTTS + Fish Speech) ---
+            from app.components.fish_speech_engine import FishSpeechTTSPool
+            _is_fish = isinstance(self.tts_worker_pool, FishSpeechTTSPool)
+            _adaptive = self._get_adaptive_speed(queue_size)
+
+            if _is_fish:
+                _base = getattr(self.tts_worker_pool, "current_speed", 1.0)
+                _effective = max(_base, _adaptive)
+            else:
+                _effective = _adaptive  # XTTS: только adaptive поверх уже сжатого аудио
+
+            if _effective > 1.001:
+                play_audio = _apply_atempo(batch["audio"], _effective)
+                play_duration = batch["duration"] / _effective
+                self.logger.info(f"⚡ Adaptive speed {_effective:.1f}x (queue={queue_size}) → {batch['duration']:.1f}s → {play_duration:.1f}s")
+            else:
+                play_audio = batch["audio"]
+                play_duration = batch["duration"]
+
             # Отправляем аудио
             await self.websocket.send_json({
                 "type": "audio_output",
-                "data": base64.b64encode(batch["audio"]).decode(),
-                "duration": batch["duration"],
+                "data": base64.b64encode(play_audio).decode(),
+                "duration": play_duration,
                 "timestamp": time.time()
             })
 
@@ -629,7 +704,7 @@ class BatchQueue:
             await self.websocket.send_json(ui_metrics)
 
             # Ждём окончания воспроизведения
-            await asyncio.sleep(batch["duration"])
+            await asyncio.sleep(play_duration)
 
             # Увеличиваем счётчик обработанных батчей
             self.metrics.batches_processed += 1
@@ -675,6 +750,13 @@ class BatchQueue:
             self.playback_task.cancel()
             try:
                 await self.playback_task
+            except asyncio.CancelledError:
+                pass
+
+        if self.heartbeat_task:
+            self.heartbeat_task.cancel()
+            try:
+                await self.heartbeat_task
             except asyncio.CancelledError:
                 pass
 
@@ -728,10 +810,18 @@ class BatchQueue:
         try:
             pipeline_start = time.time()
 
+            # RMS GATE: отсекаем тишину/тихий шум до вызова Whisper
+            rms = float(np.sqrt(np.mean(audio_array ** 2)))
+            if rms < 0.01:
+                self.logger.info(
+                    f"⏭️ Chunk #{chunk_id}: RMS={rms:.4f} < 0.01 → silence/noise, skipping Whisper"
+                )
+                return None
+
             # STEP 1: STT (Local Whisper on GPU or Groq)
             async with self.whisper_semaphore:
                 start = time.time()
-                self.logger.info(f"🎧 Chunk #{chunk_id} → WHISPER...")
+                self.logger.info(f"🎧 Chunk #{chunk_id} → WHISPER (RMS={rms:.3f})...")
                 transcription = await self.whisper_client.transcribe(audio_array)
                 stt_duration = time.time() - start
                 self.metrics.record_latency("stt", stt_duration)

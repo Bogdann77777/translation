@@ -40,6 +40,7 @@ class LocalWhisperClient:
         # ВАЖНО: Mutex для CUDA операций (предотвращает race condition)
         self._cuda_lock = asyncio.Lock()
 
+
         # Загружаем модель
         self.logger.info(f"Loading Whisper model: {self.model_size} on {self.device}:{self.gpu_id} (compute: {self.compute_type})")
 
@@ -88,8 +89,10 @@ class LocalWhisperClient:
                     segments, info = await asyncio.to_thread(
                         self.model.transcribe,
                         audio_array,
-                        language=None,  # Auto-detect language (was: self.language = "en")
+                        language="en",
                         beam_size=5,
+                        condition_on_previous_text=False,
+                        no_speech_threshold=0.85,
                         vad_filter=True,
                         vad_parameters=dict(
                             threshold=0.5,
@@ -105,12 +108,18 @@ class LocalWhisperClient:
 
                     full_text = " ".join(text_parts).strip()
 
+                    lang_prob = round(getattr(info, "language_probability", 1.0), 3)
+
                     result = {
                         "text": full_text,
-                        "language": info.language
+                        "language": info.language,
+                        "language_probability": lang_prob
                     }
 
-                    self.logger.info(f"Transcribed: {len(result['text'])} chars (lang: {info.language})")
+                    self.logger.info(
+                        f"Transcribed: {len(result['text'])} chars "
+                        f"(lang: {info.language}, confidence: {lang_prob:.2f})"
+                    )
                     return result
 
                 except Exception as e:

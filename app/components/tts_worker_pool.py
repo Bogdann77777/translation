@@ -15,12 +15,44 @@ XTTS-v2 не является thread-safe и вызывает CUDA assertion err
 
 import os
 import time
+import subprocess
 import multiprocessing as mp
 from queue import Empty
 import numpy as np
 import asyncio
 from app.config import load_config
 from app.monitoring.logger import setup_logger
+
+
+def _apply_atempo(wav_bytes: bytes, speed: float) -> bytes:
+    """
+    Apply time-stretch without pitch change using ffmpeg atempo filter.
+
+    atempo accepts 0.5–2.0 per stage; chain two stages for speed > 2.0.
+    Falls back to original bytes if ffmpeg is unavailable.
+    """
+    if speed <= 1.001:
+        return wav_bytes
+
+    if speed <= 2.0:
+        filter_str = f"atempo={speed:.4f}"
+    else:
+        # e.g. 4.0 → atempo=2.0,atempo=2.0
+        filter_str = f"atempo=2.0,atempo={speed / 2.0:.4f}"
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "wav", "-i", "pipe:0",
+        "-filter:a", filter_str,
+        "-f", "wav", "pipe:1"
+    ]
+    try:
+        result = subprocess.run(cmd, input=wav_bytes, capture_output=True, timeout=30)
+        if result.returncode == 0 and result.stdout:
+            return result.stdout
+    except Exception:
+        pass
+    return wav_bytes  # fallback: return original unchanged
 
 
 def _tts_worker_process(gpu_id: int, input_queue: mp.Queue, output_queue: mp.Queue, ready_event: mp.Event):
@@ -62,7 +94,14 @@ def _tts_worker_process(gpu_id: int, input_queue: mp.Queue, output_queue: mp.Que
                     logger.info(f"TTS Worker #{gpu_id} received shutdown signal")
                     break
 
-                request_id, text = request
+                request_id, text, speed = request
+
+                # Smart speed split: XTTS ≤ 2.0 (quality limit), ffmpeg atempo handles the rest
+                # e.g. speed=4.0 → XTTS=2.0, atempo=2.0 → same total 4x, no chipmunk effect
+                xtts_speed = min(speed, 2.0)
+                atempo_factor = speed / xtts_speed  # e.g. 4.0/2.0 = 2.0
+
+                engine.speed = xtts_speed
 
                 # Обрабатываем TTS (async call в sync worker - используем asyncio.run)
                 start_time = time.time()
@@ -74,9 +113,15 @@ def _tts_worker_process(gpu_id: int, input_queue: mp.Queue, output_queue: mp.Que
                 audio_data_size = len(audio_bytes) - 44  # WAV header
                 audio_duration = audio_data_size / (tts_sample_rate * 2)  # 2 bytes/sample
 
+                # Apply ffmpeg atempo for remaining speed (pitch-preserving time-stretch)
+                if atempo_factor > 1.001:
+                    audio_bytes = _apply_atempo(audio_bytes, atempo_factor)
+                    audio_data_size = len(audio_bytes) - 44
+                    audio_duration = audio_data_size / (tts_sample_rate * 2)
+
                 logger.info(
                     f"Worker #{gpu_id}: Request #{request_id} done in {duration:.2f}s "
-                    f"(audio: {audio_duration:.1f}s)"
+                    f"(audio: {audio_duration:.1f}s, xtts_speed={xtts_speed}x, atempo={atempo_factor:.2f}x)"
                 )
 
                 # Отправляем результат
@@ -131,6 +176,10 @@ class TTSWorkerPool:
         self.input_queue = mp.Queue()
         self.output_queue = mp.Queue()
 
+        # Текущая скорость (можно менять динамически через set_speed)
+        tts_config = load_config()["models"]["tts"]
+        self.current_speed = tts_config.get("speed", 2.0)
+
         # Счётчик запросов
         self.request_counter = 0
         self.pending_requests = {}  # request_id -> asyncio.Future
@@ -178,8 +227,8 @@ class TTSWorkerPool:
         future = asyncio.get_event_loop().create_future()
         self.pending_requests[request_id] = future
 
-        # Отправляем запрос в очередь (workers разберут)
-        self.input_queue.put((request_id, text))
+        # Отправляем запрос в очередь с текущей скоростью
+        self.input_queue.put((request_id, text, self.current_speed))
 
         # Запускаем фоновую задачу для получения результата
         asyncio.create_task(self._collect_result(request_id))
@@ -216,6 +265,17 @@ class TTSWorkerPool:
             except:
                 # Очередь пуста - ждём немного
                 await asyncio.sleep(0.01)
+
+    def set_speed(self, speed: float) -> None:
+        """
+        Динамически меняет скорость TTS.
+        Применяется к следующим запросам синтеза (уже запущенные не меняются).
+
+        Args:
+            speed: Множитель скорости (1.0 = норма, 4.0 = 4x быстрее)
+        """
+        self.current_speed = speed
+        self.logger.info(f"TTS speed changed to {speed}x")
 
     def shutdown(self):
         """Останавливает все worker процессы."""

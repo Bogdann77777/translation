@@ -18,7 +18,7 @@ class SmartWhisperASR:
     - sep = "" because faster-whisper includes spaces within word tokens
     """
 
-    sep = ""  # faster-whisper words already include leading/trailing spaces
+    sep = " "  # normalize: strip words in ts_words(), join with space
 
     def __init__(self, model, language: str = "en"):
         """
@@ -73,7 +73,7 @@ class SmartWhisperASR:
                 continue
             if hasattr(segment, 'words') and segment.words:
                 for word in segment.words:
-                    t = (word.start, word.end, word.word)
+                    t = (word.start, word.end, word.word.strip())
                     o.append(t)
         return o
 

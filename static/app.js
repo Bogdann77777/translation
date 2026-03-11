@@ -8,6 +8,7 @@ let scriptNode = null;
 let isRecording = false;
 let currentSpeed = 1.0; // XTTS speed (1.0 = normal, 2.0 = max without distortion). Browser playbackRate NOT used.
 let translationMode = 'smart'; // 'smart', 'literal', or 'contextual' (default: smart = LocalAgreement-2)
+let autoRestart = false; // Auto-restart session after WS reconnect (if recording was active)
 
 // ============================================
 // LOGGING TO HTML CONSOLE
@@ -61,12 +62,30 @@ console.error = function(...args) {
 function connectWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/translate`;
-    
+
+    // Detach handlers from old WS before replacing it.
+    // Prevents "ghost onclose": when the server closes the OLD connection after we've
+    // already moved to a new WS, the old onclose would fire with ws pointing to the NEW
+    // WebSocket — killing the new session by sending an unwanted "stop" command.
+    if (ws) {
+        ws.onclose = null;
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+    }
+
     ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
         console.log('[WS] WebSocket connected to', wsUrl);
         updateStatus('connected');
+
+        // Auto-restart session if it was running before disconnect
+        if (autoRestart) {
+            autoRestart = false;
+            console.log('[WS] Auto-restarting session after reconnect...');
+            setTimeout(() => startSession(), 500);
+        }
     };
 
     ws.onmessage = (event) => {
@@ -84,14 +103,15 @@ function connectWebSocket() {
     ws.onclose = (event) => {
         console.log('[WS] WebSocket disconnected. Code:', event.code, 'Reason:', event.reason);
         updateStatus('disconnected');
-        
-        // Stop recording if active
+
+        // If session was active, schedule auto-restart after reconnect
         if (isRecording) {
-            console.log('[WS] Connection lost while recording - stopping session');
+            console.log('[WS] Connection lost while recording - will auto-restart after reconnect');
+            autoRestart = true;
             stopSession();
         }
 
-        // Переподключение через 3 секунды
+        // Reconnect in 3 seconds
         console.log('[WS] Reconnecting in 3 seconds...');
         setTimeout(connectWebSocket, 3000);
     };
@@ -110,6 +130,10 @@ function handleMessage(message) {
     const { type, data } = message;
 
     switch(type) {
+        case 'heartbeat':
+            // Server keepalive during silent gaps — ignore silently
+            break;
+
         case 'session_started':
             console.log('[MSG] Session started');
             break;
@@ -294,10 +318,12 @@ async function startSession() {
                 console.log('[AUDIO] Sending chunk #' + chunkCount + ', size:', int16Data.length, 'samples');
             }
 
-            ws.send(JSON.stringify({
-                type: 'audio',
-                data: base64Audio
-            }));
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'audio',
+                    data: base64Audio
+                }));
+            }
         };
 
         // Подключаем nodes
@@ -394,6 +420,12 @@ let selectedMicId = null;
 
 async function loadMicrophones() {
     const micSelect = document.getElementById('micSelect');
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        console.warn('[MIC] MediaDevices API unavailable (not a secure context — use HTTPS or localhost)');
+        micSelect.innerHTML = '<option value="">Microphone access requires HTTPS or localhost</option>';
+        return;
+    }
 
     try {
         console.log('[MIC] Requesting permission to enumerate devices...');

@@ -170,12 +170,20 @@ class SmartStreamProcessor:
         self.lock = asyncio.Lock()              # Protects audio_buffer and LocalAgreement state
         self._is_processing = False             # Prevents concurrent Whisper runs
 
+        # Diagnostics counters
+        self._chunk_count = 0                   # Total audio chunks received
+        self._whisper_run_count = 0             # Total Whisper runs executed
+        self._session_start = None              # Set on first chunk
+
         # Sentence accumulation buffer: collect committed words until complete sentence
         # Prevents "Spain" / "that" / "of course" from becoming individual TTS chunks
         self._pending_text = ""                 # Accumulated committed words not yet sent to TTS
         self._pending_last_update = 0.0         # Timestamp of last update (for timeout flush)
         self._min_sentence_chars = 40           # Min chars before considering a flush
-        self._sentence_timeout_sec = 6.0        # Force flush after this silence (safety net)
+        self._sentence_timeout_sec = 1.5        # Flush after silence IF >= _min_timeout_chars
+        self._min_timeout_chars = 10            # Min chars to flush at short timeout (1.5s)
+        self._long_timeout_sec = 2.0            # Force flush even short text after this long
+        self._last_flushed_words = []           # Tail of last flushed chunk (for cross-flush dedup)
 
         self.logger.info(
             f"SmartStreamProcessor initialized: "
@@ -191,7 +199,22 @@ class SmartStreamProcessor:
         triggers a Whisper run + LocalAgreement. Committed text is sent
         to batch_queue for translation + TTS.
         """
+        import time as _time2
         audio_float = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+
+        self._chunk_count += 1
+        if self._session_start is None:
+            self._session_start = _time2.time()
+        if self._chunk_count % 100 == 0:
+            elapsed = _time2.time() - self._session_start
+            self.logger.info(
+                f"📊 SmartProcessor alive: {self._chunk_count} chunks received, "
+                f"{self._whisper_run_count} Whisper runs, "
+                f"session {elapsed:.0f}s, "
+                f"_is_processing={self._is_processing}, "
+                f"buffer={len(self.audio_buffer)/self.SAMPLE_RATE:.1f}s, "
+                f"pending_text='{self._pending_text[:40] if self._pending_text else ''}'"
+            )
 
         should_process = False
         audio_snapshot = None
@@ -210,8 +233,31 @@ class SmartStreamProcessor:
                 offset_snapshot = self.buffer_time_offset
 
         if should_process:
+            # Cap snapshot to buffer_trimming_sec — Whisper never runs on >15s of audio
+            # Prevents the buffer from causing 20-40s Whisper runs that stall the pipeline
+            max_samples = int(self.buffer_trimming_sec * self.SAMPLE_RATE)
+            if len(audio_snapshot) > max_samples:
+                excess = len(audio_snapshot) - max_samples
+                audio_snapshot = audio_snapshot[excess:]
+                offset_snapshot += excess / self.SAMPLE_RATE
+                self.logger.warning(
+                    f"⚡ Snapshot capped to {self.buffer_trimming_sec:.0f}s "
+                    f"(buffer was {(excess + max_samples) / self.SAMPLE_RATE:.0f}s)"
+                )
+
+            import time as _time3
+            self._whisper_run_count += 1
+            run_num = self._whisper_run_count
+            self.logger.debug(f"🎙️ Whisper run #{run_num} START (buffer {len(audio_snapshot)/self.SAMPLE_RATE:.1f}s)")
+            whisper_start = _time3.time()
             try:
                 committed_text = await self._run_process_iter(audio_snapshot, offset_snapshot)
+                whisper_elapsed = _time3.time() - whisper_start
+                self.logger.debug(f"🎙️ Whisper run #{run_num} DONE in {whisper_elapsed:.2f}s → committed: '{committed_text.strip() if committed_text else ''}'")
+            except Exception as e:
+                import traceback as _tb
+                self.logger.error(f"🔴 Whisper run #{run_num} EXCEPTION: {type(e).__name__}: {e}\n{''.join(_tb.format_exc())}")
+                committed_text = ""
             finally:
                 async with self.lock:
                     self._is_processing = False
@@ -220,13 +266,20 @@ class SmartStreamProcessor:
                 self.logger.info(f"🧠 LocalAgreement COMMITTED: '{committed_text.strip()}'")
                 await self._accumulate_and_maybe_flush(committed_text.strip())
 
-        # Timeout flush: if pending text hasn't been flushed for _sentence_timeout_sec
-        # (covers case where speech ends mid-sentence with no terminal punctuation)
+        # Two-tier timeout flush:
+        # - Short timeout (1.5s): only flush if accumulated text >= _min_timeout_chars (25)
+        #   Prevents micro-chunks ("we go", "cooks overnight") from going to LLM alone
+        # - Long timeout (4.0s): force flush regardless of length (safety net)
         import time as _time
-        if (self._pending_text and
-                self._pending_last_update > 0 and
-                _time.time() - self._pending_last_update > self._sentence_timeout_sec):
-            await self._flush_pending("timeout")
+        if self._pending_text and self._pending_last_update > 0:
+            waited = _time.time() - self._pending_last_update
+            pending_len = len(self._pending_text.strip())
+            if waited > self._long_timeout_sec:
+                self.logger.info(f"⏱️ Long timeout ({waited:.1f}s) flush: '{self._pending_text[:60]}'")
+                await self._flush_pending("long_timeout")
+            elif waited > self._sentence_timeout_sec and pending_len >= self._min_timeout_chars:
+                self.logger.info(f"⏱️ Timeout flush ({waited:.1f}s, {pending_len} chars): '{self._pending_text[:60]}'")
+                await self._flush_pending("timeout")
 
     async def _accumulate_and_maybe_flush(self, new_text: str) -> None:
         """
@@ -241,6 +294,54 @@ class SmartStreamProcessor:
         from each becoming separate TTS chunks (which sound choppy and flood the queue).
         """
         import time as _time
+
+        # Deduplication: LocalAgreement can re-commit words already in _pending_text
+        # when Whisper assigns slightly different timestamps across consecutive runs
+        # on the same rolling audio buffer.
+        # Fix: check if new_text starts with words already at the END of _pending_text
+        # and remove the overlapping prefix before accumulating.
+        if self._pending_text and new_text.strip():
+            pending_words = self._pending_text.split()
+            new_words = new_text.strip().split()
+            max_overlap = min(len(pending_words), len(new_words), 30)
+            removed = 0
+            for overlap_size in range(max_overlap, 3, -1):  # require at least 4-word match
+                pw = [w.lower().strip(".,!?") for w in pending_words[-overlap_size:]]
+                nw = [w.lower().strip(".,!?") for w in new_words[:overlap_size]]
+                if pw == nw:
+                    new_words = new_words[overlap_size:]
+                    removed = overlap_size
+                    break
+            if removed:
+                self.logger.info(f"🔄 Dedup: removed {removed} re-committed words from '{new_text.strip()[:60]}'")
+                new_text = " ".join(new_words)
+            if not new_text.strip():
+                return  # Entire commit was a duplicate — skip
+
+        # Cross-flush dedup: detect when LocalAgreement re-commits words from the PREVIOUS chunk.
+        # Happens when a chunk is flushed mid-sentence (long_clause/timeout) and the next Whisper
+        # run re-confirms the tail of that chunk as "stable", producing a duplicate mid-text.
+        # Example: chunk5="...The world was waking" → chunk6="up unbothered. The world was waking up..."
+        #          → truncate at the repeat → chunk6="up unbothered."
+        if self._last_flushed_words and not self._pending_text and new_text.strip():
+            new_words = new_text.strip().split()
+            found_at = -1
+            for start_pos in range(1, len(new_words)):
+                remaining = new_words[start_pos:]
+                for overlap_size in range(min(len(self._last_flushed_words), len(remaining), 10), 3, -1):
+                    pw = [w.lower().strip(".,!?") for w in self._last_flushed_words[-overlap_size:]]
+                    nw = [w.lower().strip(".,!?") for w in remaining[:overlap_size]]
+                    if pw == nw:
+                        found_at = start_pos
+                        break
+                if found_at >= 0:
+                    break
+            if found_at > 0:
+                removed = " ".join(new_words[found_at:])
+                new_text = " ".join(new_words[:found_at])
+                self.logger.info(f"🔄 Cross-flush dedup: truncated repeat at pos {found_at}: '{removed[:60]}'")
+            if not new_text.strip():
+                return
 
         # Append to pending buffer
         if self._pending_text:
@@ -265,8 +366,8 @@ class SmartStreamProcessor:
             # Long enough AND ends with any pause marker — good cut point
             should_flush = True
             flush_reason = f"long_clause ({total_chars} chars)"
-        elif total_chars >= 120:
-            # Safety: never accumulate more than ~120 chars regardless
+        elif total_chars >= 150:
+            # Safety: never accumulate more than ~150 chars regardless
             should_flush = True
             flush_reason = f"max_length ({total_chars} chars)"
 
@@ -280,6 +381,9 @@ class SmartStreamProcessor:
         text = self._pending_text.strip()
         self._pending_text = ""
         self._pending_last_update = 0.0
+        # Save tail for cross-flush dedup (next commit after this flush will check against it)
+        words = text.split()
+        self._last_flushed_words = words[-30:]
         self.logger.info(f"🧠 FLUSHING ({reason}): '{text}'")
         await self.batch_queue.add_text_batch(text)
 
@@ -317,10 +421,19 @@ class SmartStreamProcessor:
             # Build committed text (faster-whisper sep="" means spaces are in the words)
             committed_text = self.asr.sep.join(w for _, _, w in committed_words)
 
-            # Trim buffer if it's getting too long
+            # Trim buffer at last committed word boundary (safe for LocalAgreement).
+            # Force-trimming at arbitrary points breaks LocalAgreement because consecutive
+            # Whisper runs would see shifted audio and fail to find a stable prefix.
+            # Snapshot cap above ensures Whisper always runs fast regardless of buffer size.
             buffer_secs = len(self.audio_buffer) / self.SAMPLE_RATE
             if buffer_secs > self.buffer_trimming_sec:
-                self._chunk_completed_segment(segments)
+                last_committed = self.transcript_buffer.last_commited_time
+                if last_committed > self.buffer_time_offset + 1.0:
+                    self._chunk_at(last_committed)
+                    new_secs = len(self.audio_buffer) / self.SAMPLE_RATE
+                    self.logger.debug(
+                        f"🔪 Buffer trimmed at commit boundary: {buffer_secs:.0f}s → {new_secs:.0f}s"
+                    )
 
         return committed_text
 

@@ -128,10 +128,13 @@ class XTTSEngine:
             # Output sample rate (24kHz default, 48kHz for browser compatibility)
             self.output_sample_rate = self.config.get("output_sample_rate", 24000)
 
-            # Speech speed (1.0 = normal, 1.3 = 30% faster)
+            # Speech speed (1.0 = normal, 2.0 = 2x faster)
             self.speed = self.config.get("speed", 1.0)
 
-            self.logger.info(f"XTTS engine initialized on {self.device}:{self.gpu_id} (output: {self.output_sample_rate}Hz, speed: {self.speed}x)")
+            # XTTS vocal temperature (0.1 = stable/consistent pace, 0.85 = default creative/variable)
+            self.temperature = self.config.get("temperature", 0.85)
+
+            self.logger.info(f"XTTS engine initialized on {self.device}:{self.gpu_id} (output: {self.output_sample_rate}Hz, speed: {self.speed}x, temperature: {self.temperature})")
 
         except Exception as e:
             self.logger.error(f"XTTS initialization failed: {type(e).__name__}: {e}", exc_info=True)
@@ -182,7 +185,9 @@ class XTTSEngine:
                 tts_kwargs = {
                     "text": text_normalized,
                     "language": self.language,
-                    "speed": self.speed  # Speed multiplier (1.0 = normal)
+                    "speed": self.speed,          # Speed multiplier (1.0 = normal, max ~2.0 before distortion)
+                    "temperature": self.temperature,  # Vocal variability (0.1 = stable, 0.85 = default)
+                    "split_sentences": False,     # No inter-sentence pauses (synthesize as one chunk)
                 }
 
                 # Only add speaker_wav if voice_sample is not None

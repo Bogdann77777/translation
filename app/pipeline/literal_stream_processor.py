@@ -47,9 +47,9 @@ class LiteralStreamProcessor:
         self.lock = asyncio.Lock()
 
         # ПАРАМЕТРЫ БЫСТРОГО РЕЖИМА
-        self.min_chunk_duration = 1.5  # Минимум 1.5 секунды
-        self.max_chunk_duration = 4.0  # Максимум 4 секунды - ПРИНУДИТЕЛЬНОЕ закрытие
-        self.min_silence_duration = 1.0  # 1.0 секунда тишины = закрыть чанк
+        self.min_chunk_duration = 1.0  # Минимум 1.0 секунды (было: 1.5)
+        self.max_chunk_duration = 4.0  # Максимум 4 секунды - ПРИНУДИТЕЛЬНОЕ закрытие (было: 3.0)
+        self.min_silence_duration = 0.5  # 0.5 секунды тишины = закрыть чанк (было: 1.0)
 
         self.logger.info(
             f"LiteralStreamProcessor: chunks {self.min_chunk_duration}-{self.max_chunk_duration}s, "
