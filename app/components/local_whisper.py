@@ -90,21 +90,26 @@ class LocalWhisperClient:
                         self.model.transcribe,
                         audio_array,
                         language="en",
-                        beam_size=5,
+                        beam_size=1,                        # was 5 — lower hallucination rate + faster
                         condition_on_previous_text=False,
-                        no_speech_threshold=0.85,
+                        no_speech_threshold=0.45,
+                        compression_ratio_threshold=2.2,    # was default 2.4 — catches repetition/hallucination
                         vad_filter=True,
                         vad_parameters=dict(
                             threshold=0.5,
                             min_speech_duration_ms=250,
-                            min_silence_duration_ms=100
+                            min_silence_duration_ms=700     # was 100ms — research: 700ms optimal
                         )
                     )
 
-                    # Собираем текст из сегментов
+                    # Собираем текст из сегментов, пропускаем сегменты с высоким no_speech_prob
                     text_parts = []
+                    max_no_speech_prob = 0.0
                     for segment in segments:
-                        text_parts.append(segment.text.strip())
+                        seg_no_speech = getattr(segment, "no_speech_prob", 0.0)
+                        max_no_speech_prob = max(max_no_speech_prob, seg_no_speech)
+                        if seg_no_speech < 0.5:
+                            text_parts.append(segment.text.strip())
 
                     full_text = " ".join(text_parts).strip()
 
@@ -113,7 +118,8 @@ class LocalWhisperClient:
                     result = {
                         "text": full_text,
                         "language": info.language,
-                        "language_probability": lang_prob
+                        "language_probability": lang_prob,
+                        "no_speech_prob": round(max_no_speech_prob, 3)
                     }
 
                     self.logger.info(

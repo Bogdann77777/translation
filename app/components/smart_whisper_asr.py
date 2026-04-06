@@ -45,15 +45,18 @@ class SmartWhisperASR:
         """
         segments, info = self.model.transcribe(
             audio,
-            language=None,          # auto-detect (preserves Russian filter in batch_queue)
+            language="en",
             initial_prompt=init_prompt or None,
-            beam_size=5,
-            word_timestamps=True,   # REQUIRED for LocalAgreement word-level alignment
+            beam_size=1,
+            word_timestamps=True,               # REQUIRED for LocalAgreement word-level alignment
+            condition_on_previous_text=False,   # prevents repetition loops
+            no_speech_threshold=0.45,
+            compression_ratio_threshold=2.2,
             vad_filter=True,
             vad_parameters=dict(
                 threshold=0.5,
                 min_speech_duration_ms=250,
-                min_silence_duration_ms=100
+                min_silence_duration_ms=700
             )
         )
         return list(segments)  # Materialise the generator
@@ -69,7 +72,7 @@ class SmartWhisperASR:
         """
         o = []
         for segment in segments:
-            if getattr(segment, 'no_speech_prob', 0) > 0.9:
+            if getattr(segment, 'no_speech_prob', 0) > 0.45:
                 continue
             if hasattr(segment, 'words') and segment.words:
                 for word in segment.words:

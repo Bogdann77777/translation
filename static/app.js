@@ -7,7 +7,6 @@ let mediaStream = null;
 let scriptNode = null;
 let isRecording = false;
 let currentSpeed = 1.0; // XTTS speed (1.0 = normal, 2.0 = max without distortion). Browser playbackRate NOT used.
-let translationMode = 'smart'; // 'smart', 'literal', or 'contextual' (default: smart = LocalAgreement-2)
 let autoRestart = false; // Auto-restart session after WS reconnect (if recording was active)
 
 // ============================================
@@ -332,12 +331,11 @@ async function startSession() {
 
         console.log('[AUDIO] Audio pipeline connected');
 
-        // Отправляем команду старта на сервер с режимом перевода и темой
+        // Отправляем команду старта на сервер с темой
         const topic = document.getElementById('topicInput').value.trim();
-        console.log('[AUDIO] Sending "start" command to server (mode:', translationMode, 'topic:', topic || 'none' + ')');
+        console.log('[AUDIO] Sending "start" command to server (topic:', topic || 'none' + ')');
         ws.send(JSON.stringify({
             type: 'start',
-            mode: translationMode,
             topic: topic || null
         }));
 
@@ -573,22 +571,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Load microphones on page load
     loadMicrophones();
-
-    // Mode selector
-    const modeSelect = document.getElementById('modeSelect');
-    modeSelect.addEventListener('change', () => {
-        translationMode = modeSelect.value;
-        console.log('[MODE] Switched to:', translationMode);
-
-        // Disable mode change during active session
-        if (isRecording) {
-            console.warn('[MODE] Cannot change mode during active session');
-            alert('Please stop the current session before changing translation mode');
-            // Revert to previous value
-            modeSelect.value = translationMode === 'contextual' ? 'literal' : 'contextual';
-            translationMode = modeSelect.value;
-        }
-    });
 
     console.log('App initialized');
 });

@@ -20,16 +20,15 @@ models:
     streaming: true
 
   tts:
-    provider: "xtts"
-    model: "tts_models/multilingual/multi-dataset/xtts_v2"
+    provider: "qwen3"
     device: "cuda"
     gpu_id: 1
     voice_sample: "voice_samples/Aleksandr.wav"
-    language: "ru"
-    streaming: true
+    qwen3_ref_text: ""   # optional transcription of voice_sample for better ZeroShot quality
     output_sample_rate: 24000
-    speed: 2.0  # Base speech speed multiplier (1.0 = normal, distortion starts above 2.0)
-    temperature: 0.1  # XTTS vocal variability (0.1 = fast/flat, 0.5 = natural with pauses, 0.85 = default)
+    speed: 1.5  # ffmpeg atempo speed (1.0 = normal, 2.0 = 2x faster, applied after synthesis)
+    temperature: 0.9  # Qwen3 generation temperature
+    daemon_port: 18432   # persistent Qwen3 daemon port (survives server restarts — only loads model once)
     fish_speech_url: "http://localhost:8080"  # Fish Speech 1.5 API server
     top_p: 0.8          # Fish Speech sampling parameter
     repetition_penalty: 1.1  # Fish Speech repetition penalty
@@ -44,8 +43,8 @@ models:
 # PIPELINE ПАРАМЕТРЫ
 # ============================================
 pipeline:
-  context_window: 30  # Increased: больше контекста для понимания темы
-  context_max_chars: 6000  # Increased: до 6000 символов истории разговора
+  context_window: 5   # 5 pairs optimal (research: 3-5, was 30 — too much noise for LLM)
+  context_max_chars: 900  # ~300 tokens EN+RU (was 6000 — excess latency)
   batch_queue_size: 12  # Pipeline processing: 12 slots for fast parallel processing
   max_batch_duration: 15.0
   min_ready_chunks_before_start: 1  # TRUE STREAMING: Играть каждый чанк сразу как готов (no buffering)
@@ -54,10 +53,10 @@ pipeline:
   vad:
     enabled: true
     threshold: 0.5
-    min_speech_duration: 3.0    # Minimum 3 sec of speech before processing (bigger chunks)
-    min_silence_duration: 1.0   # 1.0 sec silence = end of phrase (balance: not too short, not too long)
-    min_chunk_duration: 12.0    # MINIMUM 12 sec input audio (ensures 7+ sec TTS output to cover processing time 7-9s)
-    max_phrase_duration: 18.0   # MAXIMUM 18 sec input audio (ensures ~12 sec TTS output, FAT chunks to cover processing)
+    min_speech_duration: 0.25   # 250ms minimum speech (was 3.0s — too slow to start)
+    min_silence_duration: 0.7   # 700ms silence = end of phrase (research: optimal for natural pauses)
+    min_chunk_duration: 2.0     # 2s minimum chunk (was 12.0s — latency killer)
+    max_phrase_duration: 8.0    # 8s max chunk (was 18.0s — force flush earlier)
     speech_pad_ms: 200
   
   audio:

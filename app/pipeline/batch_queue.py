@@ -18,6 +18,7 @@ from app.components.local_whisper import LocalWhisperClient
 from app.components.openrouter_llm import OpenRouterClient
 from app.components.xtts_engine import XTTSEngine
 from app.components.tts_worker_pool import TTSWorkerPool, _apply_atempo
+from app.pipeline.smart_buffer import SmartBuffer
 
 
 class BatchQueue:
@@ -91,6 +92,7 @@ class BatchQueue:
             self.logger.info("Using TTS Worker Pool (2 workers on GPU 0 and GPU 1) - 20s startup delay")
 
         self.context_buffer = ContextBuffer()
+        self.smart_buffer = SmartBuffer(max_pending_chunks=2)
 
         # Topic/context for better translation accuracy
         self.topic = topic
@@ -120,6 +122,15 @@ class BatchQueue:
                 f"Adaptive speed ENABLED: {self.adaptive_speed_config['min_speed']}x - "
                 f"{self.adaptive_speed_config['max_speed']}x based on queue size"
             )
+
+        # Browser playback speed (set via UI slider, used in sleep calculation)
+        self.browser_speed = 1.0
+
+        # EMA adaptive speed state
+        self._adaptive_speed = 1.0        # Current smooth speed (1.0 = normal)
+        self._chunk_arrival_times = []     # Timestamps of last N chunk arrivals
+        self._chunk_playback_times = []    # Timestamps of last N chunk playbacks
+        self._ema_window = 30.0            # EMA window in seconds
 
         # Счетчики для мониторинга
         self.processing_count = 0  # Сколько батчей сейчас обрабатывается
@@ -167,6 +178,9 @@ class BatchQueue:
 
         await self.pipeline_semaphore.acquire()
 
+        # Track chunk arrival time for EMA adaptive speed
+        self._chunk_arrival_times.append(time.time())
+
         # Присваиваем уникальный ID чанку
         async with self.processing_lock:
             self.chunk_counter += 1
@@ -174,7 +188,6 @@ class BatchQueue:
             self.processing_count += 1
 
         # Запускаем обработку В ФОНЕ (асинхронно, БЕЗ ОЖИДАНИЯ)
-        import time
         current_time = time.strftime('%H:%M:%S')
         self.logger.info(
             f"\n╔═══ CHUNK #{chunk_id} QUEUED [{current_time}] ═══╗\n"
@@ -317,6 +330,9 @@ class BatchQueue:
 
             tts_duration = time.time() - start
             self.metrics.record_latency("tts", tts_duration)
+
+            if not audio_bytes:
+                raise RuntimeError(f"TTS returned empty/None for chunk #{chunk_id}")
 
             # Calculate audio duration from WAV header
             tts_config = load_config()["models"]["tts"]
@@ -605,15 +621,45 @@ class BatchQueue:
                 break
         self.logger.info(f"💓 Heartbeat loop STOPPED (sent {heartbeat_count} heartbeats)")
 
-    def _get_adaptive_speed(self, queue_size: int) -> float:
-        """Адаптивная скорость воспроизведения на основе размера очереди готовых чанков."""
-        if queue_size >= 3:
-            return 2.0
-        if queue_size >= 2:
-            return 1.6
-        if queue_size >= 1:
-            return 1.3
-        return 1.0
+    def _get_adaptive_speed(self, queue_size: int, total_lag: float = 0.0) -> float:
+        """
+        Lag-based adaptive speed.
+
+        Ускорение на основе РЕАЛЬНОГО отставания (в секундах), не размера очереди.
+        Queue size часто = 0 (чанки проигрываются по одному), но лаг копится.
+
+        Логика:
+        - lag < 3s → 1.0x (нормально, в пределах pipeline latency)
+        - lag 3-6s → плавно от 1.0x до 1.3x
+        - lag 6-10s → плавно от 1.3x до 1.6x
+        - lag 10-15s → плавно от 1.6x до 2.0x
+        - lag > 15s → 2.0x (максимум)
+
+        Плавное изменение: ±0.1x за чанк (не рывком).
+        """
+        # Целевая скорость на основе лага
+        if total_lag < 3.0:
+            target = 1.0
+        elif total_lag < 6.0:
+            target = 1.0 + 0.3 * (total_lag - 3.0) / 3.0  # 1.0 → 1.3
+        elif total_lag < 10.0:
+            target = 1.3 + 0.3 * (total_lag - 6.0) / 4.0  # 1.3 → 1.6
+        elif total_lag < 15.0:
+            target = 1.6 + 0.4 * (total_lag - 10.0) / 5.0  # 1.6 → 2.0
+        else:
+            target = 2.0
+
+        # Быстрый рамп при большом лаге, плавный при малом
+        diff = target - self._adaptive_speed
+        if diff > 0:
+            # Ускоряемся: шаг пропорционален отставанию (min 0.1, max 0.5)
+            step = min(0.5, max(0.1, diff * 0.6))
+            self._adaptive_speed = min(target, self._adaptive_speed + step)
+        elif diff < 0:
+            # Замедляемся: всегда плавно (-0.1 за шаг)
+            self._adaptive_speed = max(target, self._adaptive_speed - 0.1)
+
+        return self._adaptive_speed
 
     async def _play_batch(self, batch: Dict[str, Any]) -> None:
         """
@@ -658,9 +704,16 @@ class BatchQueue:
             })
 
             # --- Адаптивное ускорение (XTTS + Fish Speech) ---
+            # Считаем лаг: сколько секунд чанк ждал + сколько ещё в очереди
+            chunk_lag = time.time() - batch.get("timestamp", time.time())
+            total_lag = chunk_lag + sum(
+                b.get("duration", 3.0) for b in list(self.completed_chunks_buffer.values())
+                if b is not None
+            ) + queue_size * 3.0  # Примерная длительность чанков в очереди
+
             from app.components.fish_speech_engine import FishSpeechTTSPool
             _is_fish = isinstance(self.tts_worker_pool, FishSpeechTTSPool)
-            _adaptive = self._get_adaptive_speed(queue_size)
+            _adaptive = self._get_adaptive_speed(queue_size, total_lag)
 
             if _is_fish:
                 _base = getattr(self.tts_worker_pool, "current_speed", 1.0)
@@ -671,7 +724,7 @@ class BatchQueue:
             if _effective > 1.001:
                 play_audio = _apply_atempo(batch["audio"], _effective)
                 play_duration = batch["duration"] / _effective
-                self.logger.info(f"⚡ Adaptive speed {_effective:.1f}x (queue={queue_size}) → {batch['duration']:.1f}s → {play_duration:.1f}s")
+                self.logger.info(f"⚡ Adaptive speed {_effective:.1f}x (lag={total_lag:.1f}s, queue={queue_size}) → {batch['duration']:.1f}s → {play_duration:.1f}s")
             else:
                 play_audio = batch["audio"]
                 play_duration = batch["duration"]
@@ -703,8 +756,9 @@ class BatchQueue:
             }
             await self.websocket.send_json(ui_metrics)
 
-            # Ждём окончания воспроизведения
-            await asyncio.sleep(play_duration)
+            # Ждём окончания воспроизведения (с учётом browser playback speed)
+            effective_sleep = play_duration / max(self.browser_speed, 0.5)
+            await asyncio.sleep(effective_sleep)
 
             # Увеличиваем счётчик обработанных батчей
             self.metrics.batches_processed += 1
@@ -763,7 +817,8 @@ class BatchQueue:
         # КРИТИЧНО: Очищаем sequential buffer между сессиями
         # (иначе chunks из старой сессии будут ждать в buffer)
         self.completed_chunks_buffer.clear()
-        self.logger.debug("Sequential buffer cleared for next session")
+        self.smart_buffer.reset()
+        self.logger.debug("Sequential buffer + SmartBuffer cleared for next session")
 
         self.logger.info("Playback loop stopped")
 
@@ -812,9 +867,9 @@ class BatchQueue:
 
             # RMS GATE: отсекаем тишину/тихий шум до вызова Whisper
             rms = float(np.sqrt(np.mean(audio_array ** 2)))
-            if rms < 0.01:
+            if rms < 0.03:
                 self.logger.info(
-                    f"⏭️ Chunk #{chunk_id}: RMS={rms:.4f} < 0.01 → silence/noise, skipping Whisper"
+                    f"⏭️ Chunk #{chunk_id}: RMS={rms:.4f} < 0.03 → silence/noise, skipping Whisper"
                 )
                 return None
 
@@ -870,6 +925,36 @@ class BatchQueue:
                 )
                 return None
 
+            # BLOCKLIST: известные Whisper-галлюцинации на тишине/шуме
+            _HALLUCINATION_PHRASES = [
+                "thanks for watching", "thank you for watching",
+                "please like and subscribe", "like and subscribe",
+                "see you next time", "see you in the next",
+                "don't forget to subscribe", "hit the subscribe",
+                "since you've been", "walking into your life",
+                "you've been to the road", "subtitle", "subtitles",
+                "transcribed by", "translation by",
+                "♪", "[ music ]", "[music]", "[ applause ]", "[applause]",
+                "i'm going to be", "going to be a",
+            ]
+            stt_lower = stt_text.lower()
+            for phrase in _HALLUCINATION_PHRASES:
+                if phrase in stt_lower:
+                    self.logger.warning(
+                        f"⛔ Chunk #{chunk_id}: HALLUCINATION BLOCKLIST matched '{phrase}' "
+                        f"in '{stt_text[:80]}' — skipping"
+                    )
+                    return None
+
+            # no_speech_prob фильтр (faster-whisper)
+            no_speech_prob = transcription.get("no_speech_prob", 0.0)
+            if no_speech_prob > 0.5:
+                self.logger.warning(
+                    f"⛔ Chunk #{chunk_id}: no_speech_prob={no_speech_prob:.2f} > 0.5 "
+                    f"— likely silence, skipping"
+                )
+                return None
+
             # ЗАЩИТА ОТ WHISPER REPETITION LOOP (hallucination guard)
             # Симптом: Whisper генерирует один и тот же токен много раз подряд
             # (известный баг Whisper при тишине/шуме/низкой уверенности)
@@ -890,13 +975,32 @@ class BatchQueue:
                         )
                         return None
 
+            # SMART BUFFER: накапливаем текст до смысловой границы
+            buffer_result = self.smart_buffer.feed(stt_text)
+            if buffer_result is None:
+                self.logger.info(
+                    f"📦 Chunk #{chunk_id}: SmartBuffer absorbing — "
+                    f"waiting for sentence boundary"
+                )
+                return None
+
+            # SmartBuffer выдал готовый блок (возможно склеенный из нескольких чанков)
+            stt_text = buffer_result["text"]
+            buffer_metadata = buffer_result.get("metadata", "")
+            if buffer_metadata:
+                self.logger.info(f"📦 SmartBuffer → {buffer_metadata} ({len(stt_text)} chars)")
+
             # STEP 2: Translation (OpenRouter + context + topic)
+            # Метаданные передаются через topic (не в тексте — иначе LLM переводит теги)
+            effective_topic = self.topic or ""
+            if buffer_metadata:
+                effective_topic = f"{effective_topic} {buffer_metadata}".strip()
             async with self.translation_semaphore:
                 start = time.time()
                 self.logger.info(f"🌐 Chunk #{chunk_id} → TRANSLATION...")
                 context = await self.context_buffer.get_context()
                 translation = await self.openrouter_client.translate(
-                    stt_text, context, topic=self.topic
+                    stt_text, context, topic=effective_topic if effective_topic else None
                 )
                 translation_duration = time.time() - start
                 self.metrics.record_latency("translation", translation_duration)
@@ -913,12 +1017,13 @@ class BatchQueue:
                 self.logger.info(
                     f"[ANALYSIS] chunk=#{chunk_id} lang={transcription.get('language','?')} "
                     f"conf={transcription.get('language_probability',0):.2f}\n"
-                    f"  EN: {transcription['text']}\n"
+                    f"  EN: {stt_text}\n"
                     f"  RU: {translation}"
                 )
 
                 # Добавляем EN+RU пару в контекст (для живого нарратива)
-                await self.context_buffer.add_pair(transcription["text"], translation)
+                # Используем stt_text (из SmartBuffer, может быть склеен) для контекста
+                await self.context_buffer.add_pair(stt_text, translation)
 
             # STEP 3: TTS (Worker Pool - parallel processing on 2 GPUs)
             start = time.time()

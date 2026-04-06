@@ -79,9 +79,16 @@ async def startup_preload_models():
             preloaded_tts = FishSpeechTTSPool()
             logger.info("[2/3] FishSpeechTTSPool loaded OK")
         else:
+            # Pre-start Qwen3 daemon in the MAIN process (not inside mp.Process).
+            # Windows spawn: subprocess.PIPE is broken inside mp.Process, so the
+            # daemon must be started here first. Pool workers then just connect via socket.
+            from app.components.qwen3_tts_engine import Qwen3TTSEngine
+            logger.info("[2/3] Pre-starting Qwen3 daemon (main process)...")
+            _engine_prestart = Qwen3TTSEngine()
+            logger.info("[2/3] Qwen3 daemon ready — creating worker pool...")
             from app.components.tts_worker_pool import TTSWorkerPool
-            preloaded_tts = TTSWorkerPool(num_workers=2)
-            logger.info("[2/3] TTS Worker Pool loaded OK (2 workers ready)")
+            preloaded_tts = TTSWorkerPool(num_workers=1)
+            logger.info("[2/3] TTS Worker Pool loaded OK (1 Qwen3 worker ready)")
     except Exception as e:
         logger.error(f"[2/3] TTS load FAILED: {e}")
 
@@ -236,6 +243,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         preloaded_tts.speed = new_speed
                     logger.info(f"Speed changed to {new_speed}x")
                     await websocket.send_json({"type": "speed_changed", "speed": new_speed})
+                # Прокидываем browser speed в batch_queue для корректного sleep
+                if orchestrator and orchestrator.batch_queue:
+                    orchestrator.batch_queue.browser_speed = new_speed
 
             elif msg_type == "set_voice":
                 new_voice = message.get("voice", "")

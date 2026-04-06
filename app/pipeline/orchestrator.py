@@ -10,7 +10,7 @@ from app.monitoring.logger import setup_logger, log_json
 from app.monitoring.metrics import MetricsCollector
 from app.pipeline.batch_queue import BatchQueue
 from app.pipeline.stream_processor import StreamProcessor
-from app.pipeline.literal_stream_processor import LiteralStreamProcessor
+from app.pipeline.smart_stream_processor import SmartStreamProcessor
 
 
 class Orchestrator:
@@ -34,21 +34,19 @@ class Orchestrator:
         self.stream_processor = None
         self.session_active = False
         self.restart_count = 0
-        self.translation_mode = 'contextual'  # 'contextual' or 'literal'
 
         self.logger.info("Orchestrator initialized")
 
-    async def start_session(self, mode: str = 'contextual', topic: str = None) -> None:
+    async def start_session(self, mode: str = 'smart', topic: str = None) -> None:
         """
         Запускает новую сессию.
 
         Args:
-            mode: Режим перевода ('contextual' или 'literal')
+            mode: Ignored (always uses SmartStreamProcessor / LocalAgreement-2)
             topic: Опциональная тема/контекст разговора (для улучшения точности)
         """
-        self.translation_mode = mode
         log_json(self.logger, "INFO", "Starting session",
-                 session_id=id(self), mode=mode, topic=topic or 'none', timestamp=time.time())
+                 session_id=id(self), topic=topic or 'none', timestamp=time.time())
 
         # Pass preloaded models and topic to BatchQueue
         # NOTE: tts_engine can be TTSWorkerPool (preloaded), XTTSEngine (legacy), or None (create new pool)
@@ -61,32 +59,9 @@ class Orchestrator:
             topic=topic
         )
 
-        # Выбираем процессор в зависимости от режима
-        if mode == 'smart':
-            from app.pipeline.smart_stream_processor import SmartStreamProcessor
-            from app.components.local_whisper import LocalWhisperClient
-            # Smart mode requires local Whisper (needs .model attribute for direct access)
-            if not isinstance(self.whisper_client, LocalWhisperClient):
-                self.logger.warning("Smart mode requires local Whisper — falling back to literal mode")
-                mode = 'literal'
-                self.stream_processor = LiteralStreamProcessor(self.batch_queue)
-                self.logger.info("🚀 LITERAL mode (smart mode fallback)")
-            else:
-                # Reuse the already-loaded Whisper model (no double VRAM usage)
-                whisper_model = self.whisper_client.model
-                self.stream_processor = SmartStreamProcessor(
-                    self.batch_queue,
-                    whisper_model,
-                    min_chunk_size=1.0,      # Run Whisper every 1s of new audio
-                    buffer_trimming_sec=15.0  # Max 15s buffer before forced trim
-                )
-                self.logger.info("🧠 SMART mode: LocalAgreement-2 semantic chunking (Whisper segment boundaries)")
-        elif mode == 'literal':
-            self.stream_processor = LiteralStreamProcessor(self.batch_queue)
-            self.logger.info("🚀 LITERAL mode: Fast processing (2-5s chunks, 0.2s pauses)")
-        else:
-            self.stream_processor = StreamProcessor(self.batch_queue)
-            self.logger.info("🎯 CONTEXTUAL mode: Quality processing (12-18s chunks, 1.0s pauses)")
+        # Процессор: SmartStreamProcessor (LocalAgreement-2, semantic chunking)
+        self.stream_processor = SmartStreamProcessor(self.batch_queue, self.whisper_client.model)
+        self.logger.info("🧠 SMART mode: LocalAgreement-2, semantic chunking, no VAD cuts")
 
         self.session_active = True
 

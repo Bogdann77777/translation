@@ -65,20 +65,17 @@ def _tts_worker_process(gpu_id: int, input_queue: mp.Queue, output_queue: mp.Que
         output_queue: Очередь результатов (request_id, audio_bytes, duration)
         ready_event: Event для сигнализации что worker готов
     """
-    # КРИТИЧНО: Установить CUDA_VISIBLE_DEVICES ДО импорта PyTorch/TTS
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
-
-    # Теперь импортируем TTS (после установки GPU)
-    from app.components.xtts_engine import XTTSEngine
+    # Qwen3TTSEngine запускает qwen3tts_env subprocess — CUDA_VISIBLE_DEVICES больше не нужен здесь
+    # (GPU задаётся внутри Qwen3TTSEngine через конфиг)
+    from app.components.qwen3_tts_engine import Qwen3TTSEngine
 
     logger = setup_logger(f"tts_worker_{gpu_id}")
     logger.info(f"🚀 TTS Worker #{gpu_id} starting on GPU {gpu_id}...")
 
     try:
         # Загружаем модель на этот GPU
-        # ВАЖНО: После CUDA_VISIBLE_DEVICES=gpu_id, используем device_id=0
-        # (т.к. выбранный GPU становится единственным видимым с индексом 0)
-        engine = XTTSEngine(device_override='cuda', gpu_id_override=0)
+        # ВАЖНО: После CUDA_VISIBLE_DEVICES=gpu_id, cuda:0 = выбранный физический GPU
+        engine = Qwen3TTSEngine()
         logger.info(f"✅ TTS Worker #{gpu_id} READY on GPU {gpu_id}")
 
         # Сигнализируем что готовы
@@ -96,12 +93,8 @@ def _tts_worker_process(gpu_id: int, input_queue: mp.Queue, output_queue: mp.Que
 
                 request_id, text, speed = request
 
-                # Smart speed split: XTTS ≤ 2.0 (quality limit), ffmpeg atempo handles the rest
-                # e.g. speed=4.0 → XTTS=2.0, atempo=2.0 → same total 4x, no chipmunk effect
-                xtts_speed = min(speed, 2.0)
-                atempo_factor = speed / xtts_speed  # e.g. 4.0/2.0 = 2.0
-
-                engine.speed = xtts_speed
+                # Qwen3 не имеет внутреннего speed — весь speed через ffmpeg atempo
+                atempo_factor = speed
 
                 # Обрабатываем TTS (async call в sync worker - используем asyncio.run)
                 start_time = time.time()
@@ -113,7 +106,7 @@ def _tts_worker_process(gpu_id: int, input_queue: mp.Queue, output_queue: mp.Que
                 audio_data_size = len(audio_bytes) - 44  # WAV header
                 audio_duration = audio_data_size / (tts_sample_rate * 2)  # 2 bytes/sample
 
-                # Apply ffmpeg atempo for remaining speed (pitch-preserving time-stretch)
+                # Apply ffmpeg atempo for speed (pitch-preserving time-stretch)
                 if atempo_factor > 1.001:
                     audio_bytes = _apply_atempo(audio_bytes, atempo_factor)
                     audio_data_size = len(audio_bytes) - 44
@@ -121,7 +114,7 @@ def _tts_worker_process(gpu_id: int, input_queue: mp.Queue, output_queue: mp.Que
 
                 logger.info(
                     f"Worker #{gpu_id}: Request #{request_id} done in {duration:.2f}s "
-                    f"(audio: {audio_duration:.1f}s, xtts_speed={xtts_speed}x, atempo={atempo_factor:.2f}x)"
+                    f"(audio: {audio_duration:.1f}s, atempo={atempo_factor:.2f}x)"
                 )
 
                 # Отправляем результат
@@ -136,7 +129,8 @@ def _tts_worker_process(gpu_id: int, input_queue: mp.Queue, output_queue: mp.Que
                 output_queue.put((request_id, None, None))
 
     except Exception as e:
-        logger.error(f"Worker #{gpu_id} initialization failed: {e}")
+        import traceback as _tb
+        logger.error(f"Worker #{gpu_id} initialization failed: {e}\n{_tb.format_exc()}")
         ready_event.set()  # Всё равно сигнализируем чтобы не зависнуть
 
     logger.info(f"TTS Worker #{gpu_id} shutdown")
@@ -184,11 +178,13 @@ class TTSWorkerPool:
         self.request_counter = 0
         self.pending_requests = {}  # request_id -> asyncio.Future
 
-        # Запускаем workers
+        # Запускаем workers — Qwen3 на GPU из конфига (не делим GPU с Whisper)
+        tts_base_gpu = load_config()["models"]["tts"].get("gpu_id", 1)
         self.workers = []
         self.ready_events = []
 
-        for gpu_id in range(num_workers):
+        for i in range(num_workers):
+            gpu_id = tts_base_gpu + i  # e.g. base=1 → [1] (1 worker) or [1,2] (2 workers)
             ready_event = mp.Event()
             self.ready_events.append(ready_event)
 
@@ -204,7 +200,20 @@ class TTSWorkerPool:
         # Ждём пока все workers загрузятся
         self.logger.info(f"Waiting for {num_workers} TTS workers to initialize...")
         for i, event in enumerate(self.ready_events):
-            event.wait(timeout=60)  # 60 секунд на загрузку модели
+            if not event.wait(timeout=300):  # 300s — Qwen3 CUDA graph compile ~60s
+                # Timeout with no ready signal — worker is stuck or crashed
+                self.workers[i].join(timeout=1)
+                raise RuntimeError(
+                    f"TTS Worker #{i} failed to initialize within 300s — "
+                    "check logs for errors"
+                )
+            # Event fired — verify process actually alive (guards against crash-after-set race)
+            self.workers[i].join(timeout=0.5)
+            if not self.workers[i].is_alive():
+                raise RuntimeError(
+                    f"TTS Worker #{i} process died during initialization — "
+                    "check logs for the initialization error above"
+                )
             self.logger.info(f"Worker #{i} is READY")
 
         self.logger.info(f"✅ TTSWorkerPool initialized with {num_workers} workers")
@@ -262,8 +271,11 @@ class TTSWorkerPool:
                         other_future = self.pending_requests.pop(result_id)
                         other_future.set_result((audio_bytes, audio_duration))
 
-            except:
-                # Очередь пуста - ждём немного
+            except Empty:
+                # Queue empty — wait a bit
+                await asyncio.sleep(0.01)
+            except Exception as e:
+                self.logger.error(f"_collect_result unexpected error for req#{request_id}: {e}")
                 await asyncio.sleep(0.01)
 
     def set_speed(self, speed: float) -> None:
