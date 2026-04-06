@@ -107,6 +107,17 @@ class OpenRouterClient:
             user_message += "\n".join(context_lines)
             user_message += "\n\n"
 
+            # Tail bridge: if previous chunk ended mid-phrase, give LLM the exact tail words
+            last_en = context[-1].get("en", "").strip()
+            if last_en:
+                tail_words = " ".join(last_en.split()[-8:])
+                # Only add bridge hint if last chunk didn't end with sentence-final punctuation
+                if last_en and last_en[-1] not in ".!?":
+                    user_message += (
+                        f"⚠️ BRIDGE NOTE: The previous chunk ended mid-phrase: '...{tail_words}'\n"
+                        f"If this chunk continues that phrase, bridge them naturally in Russian.\n\n"
+                    )
+
         user_message += f"NOW TRANSLATE TO RUSSIAN:\n{text}"
 
         messages = [

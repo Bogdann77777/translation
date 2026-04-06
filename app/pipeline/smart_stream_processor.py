@@ -182,7 +182,7 @@ class SmartStreamProcessor:
         self._min_sentence_chars = 40           # Min chars before considering a flush
         self._sentence_timeout_sec = 1.5        # Flush after silence IF >= _min_timeout_chars
         self._min_timeout_chars = 10            # Min chars to flush at short timeout (1.5s)
-        self._long_timeout_sec = 2.0            # Force flush even short text after this long
+        self._long_timeout_sec = 0.8            # Force flush even short text after this long (was 2.0)
         self._last_flushed_words = []           # Tail of last flushed chunk (for cross-flush dedup)
 
         self.logger.info(

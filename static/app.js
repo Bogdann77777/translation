@@ -3,6 +3,7 @@
 // ============================================
 let ws = null;
 let audioContext = null;
+let audioNextStartTime = 0; // Scheduled queue: next chunk starts exactly when previous ends
 let mediaStream = null;
 let scriptNode = null;
 let isRecording = false;
@@ -198,7 +199,15 @@ function playAudio(base64Audio) {
         // Changing playbackRate also changes pitch → distorted voice.
         // Speed is controlled server-side via XTTS speed parameter (no distortion).
         source.connect(audioContext.destination);
-        source.start(0);
+
+        // Scheduled queue: каждый чанк начинается ТОЧНО когда закончился предыдущий.
+        // Без этого source.start(0) = "сейчас" → перекрытие при быстрых чанках.
+        const now = audioContext.currentTime;
+        if (audioNextStartTime < now) {
+            audioNextStartTime = now + 0.05; // небольшой gap чтобы избежать щелчков
+        }
+        source.start(audioNextStartTime);
+        audioNextStartTime += audioBuffer.duration;
     }).catch(err => {
         console.error('Audio decode error:', err);
     });
@@ -284,6 +293,7 @@ async function startSession() {
         audioContext = new (window.AudioContext || window.webkitAudioContext)({
             sampleRate: 16000
         });
+        audioNextStartTime = 0; // сброс очереди при каждом новом старте
 
         console.log('[AUDIO] AudioContext created, sample rate:', audioContext.sampleRate);
 

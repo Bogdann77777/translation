@@ -94,6 +94,8 @@ class LocalWhisperClient:
                         condition_on_previous_text=False,
                         no_speech_threshold=0.45,
                         compression_ratio_threshold=2.2,    # was default 2.4 — catches repetition/hallucination
+                        log_prob_threshold=-0.65,           # was -1.0 — reject low-confidence segments
+                        hallucination_silence_threshold=0.5, # skip segments that are mostly silence tokens
                         vad_filter=True,
                         vad_parameters=dict(
                             threshold=0.5,
